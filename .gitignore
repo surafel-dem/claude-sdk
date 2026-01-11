@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Environment
+.env
+.env.local
+
+# Build outputs
+dist/
+.next/
+
+# Logs
+logs/
+*.log
+
+# OS files
+.DS_Store
+
+# Generated research files (keep directories, ignore contents)
+files/research_notes/*
+!files/research_notes/.gitkeep
+files/data/*
+!files/data/.gitkeep
+files/charts/*
+!files/charts/.gitkeep
+files/reports/*
+!files/reports/.gitkeep

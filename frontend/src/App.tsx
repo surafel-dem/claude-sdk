@@ -1,0 +1,866 @@
+import { useState, useRef, useEffect, type FormEvent } from 'react';
+import { useQuery, useMutation } from 'convex/react';
+import { api } from '@convex/_generated/api';
+import type { Id } from '@convex/_generated/dataModel';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import { Send, Loader2, FileText, X, Check, Edit3, Sparkles, Plus, MessageSquare, Trash2, LogOut } from 'lucide-react';
+import { useSession, signIn, signUp, signOut } from './lib/auth-client';
+import './App.css';
+
+// Types
+interface Activity {
+  type: 'tool' | 'search' | 'status' | 'step' | 'result' | 'artifact';
+  name: string;
+  detail?: string;
+  data?: Record<string, unknown>;
+}
+
+interface Artifact {
+  id: string;
+  type: 'plan' | 'report' | 'document';
+  title: string;
+  content: string;
+  editable?: boolean;
+  preview?: string;
+}
+
+interface MessagePart {
+  type: 'text' | 'activity' | 'artifact';
+  content: string;
+  activities?: Activity[];
+  artifact?: Artifact;
+}
+
+interface Message {
+  role: 'user' | 'assistant';
+  parts: MessagePart[];
+}
+
+// === Auth Screen ===
+function AuthScreen() {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [name, setName] = useState('');
+  const [isSignUp, setIsSignUp] = useState(false);
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  // Debug: Log the auth client config
+  console.log('[Auth Debug] VITE_CONVEX_SITE_URL:', import.meta.env.VITE_CONVEX_SITE_URL);
+
+  const handleSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    setError('');
+    setLoading(true);
+
+    console.log('[Auth Debug] Attempting', isSignUp ? 'signUp' : 'signIn', 'with email:', email);
+
+    try {
+      if (isSignUp) {
+        console.log('[Auth Debug] Calling signUp.email...');
+        const result = await signUp.email({ email, password, name });
+        console.log('[Auth Debug] signUp result:', result);
+      } else {
+        console.log('[Auth Debug] Calling signIn.email...');
+        const result = await signIn.email({ email, password });
+        console.log('[Auth Debug] signIn result:', result);
+      }
+    } catch (err) {
+      console.error('[Auth Debug] Error:', err);
+      setError(err instanceof Error ? err.message : 'Authentication failed');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleGoogleSignIn = () => {
+    console.log('[Auth Debug] Attempting Google sign in...');
+    signIn.social({ provider: "google" });
+  };
+
+  return (
+    <div className="auth-screen">
+      <div className="auth-container">
+        <div className="auth-icon">
+          <Sparkles size={32} />
+        </div>
+        <h1>Research Agent</h1>
+        <p>{isSignUp ? 'Create an account' : 'Sign in to start researching'}</p>
+
+        {/* Google Sign-In Button */}
+        <button className="auth-btn google" onClick={handleGoogleSignIn}>
+          <svg viewBox="0 0 24 24" width="18" height="18">
+            <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+            <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+            <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" />
+            <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
+          </svg>
+          Continue with Google
+        </button>
+
+        <div className="auth-divider">
+          <span>or</span>
+        </div>
+
+        <form onSubmit={handleSubmit} className="auth-form">
+          {isSignUp && (
+            <input
+              type="text"
+              placeholder="Name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              required
+            />
+          )}
+          <input
+            type="email"
+            placeholder="Email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            required
+          />
+          <input
+            type="password"
+            placeholder="Password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            required
+            minLength={8}
+          />
+
+          {error && <p className="auth-error">{error}</p>}
+
+          <button type="submit" className="auth-submit" disabled={loading}>
+            {loading ? <Loader2 size={16} className="spin" /> : (isSignUp ? 'Sign Up' : 'Sign In')}
+          </button>
+        </form>
+
+        <p className="auth-toggle">
+          {isSignUp ? 'Already have an account?' : "Don't have an account?"}{' '}
+          <button type="button" onClick={() => setIsSignUp(!isSignUp)}>
+            {isSignUp ? 'Sign In' : 'Sign Up'}
+          </button>
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// === Sidebar ===
+function Sidebar({
+  activeThreadId,
+  onSelectThread,
+  onNewThread
+}: {
+  activeThreadId: Id<"threads"> | null;
+  onSelectThread: (threadId: Id<"threads">) => void;
+  onNewThread: () => void;
+}) {
+  const threads = useQuery(api.threads.list);
+  const removeThread = useMutation(api.threads.remove);
+  const { data: session } = useSession();
+  const user = session?.user;
+
+  const handleDelete = (e: React.MouseEvent, threadId: Id<"threads">) => {
+    e.stopPropagation();
+    if (confirm("Delete this research session?")) {
+      removeThread({ threadId });
+      if (activeThreadId === threadId) {
+        onNewThread();
+      }
+    }
+  };
+
+  const formatDate = (timestamp: number) => {
+    const date = new Date(timestamp);
+    const now = new Date();
+    const diff = now.getTime() - date.getTime();
+    const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+    if (days === 0) return "Today";
+    if (days === 1) return "Yesterday";
+    if (days < 7) return `${days}d ago`;
+    return date.toLocaleDateString();
+  };
+
+  return (
+    <aside className="sidebar">
+      <div className="sidebar-header">
+        <span className="sidebar-title">Research Sessions</span>
+        <button className="new-btn" onClick={onNewThread}>
+          <Plus size={16} />
+        </button>
+      </div>
+
+      <div className="thread-list">
+        {threads === undefined ? (
+          <div className="loading-threads"><Loader2 size={16} className="spin" /></div>
+        ) : threads.length === 0 ? (
+          <div className="empty-threads">
+            <MessageSquare size={20} />
+            <span>No sessions yet</span>
+          </div>
+        ) : (
+          threads.map((thread) => (
+            <div
+              key={thread._id}
+              className={`thread-item ${activeThreadId === thread._id ? "active" : ""}`}
+              onClick={() => onSelectThread(thread._id)}
+            >
+              <div className="thread-info">
+                <span className="thread-title">{thread.title}</span>
+                <span className="thread-date">{formatDate(thread.updatedAt)}</span>
+              </div>
+              <button className="delete-btn" onClick={(e) => handleDelete(e, thread._id)}>
+                <Trash2 size={12} />
+              </button>
+            </div>
+          ))
+        )}
+      </div>
+
+      <div className="sidebar-footer">
+        {user && (
+          <div className="user-info">
+            <span className="user-email">{user.email || 'User'}</span>
+            <button className="signout-btn" onClick={() => signOut()}>
+              <LogOut size={14} />
+            </button>
+          </div>
+        )}
+      </div>
+    </aside>
+  );
+}
+
+// === Status Indicator (Cursor AI Style) ===
+// Single shimmer text that updates in place - no stacking, no expansion
+function StatusIndicator({ activities, isStreaming }: { activities: Activity[]; isStreaming?: boolean }) {
+  if (activities.length === 0) return null;
+  if (!isStreaming) return null;  // Only show when actively streaming
+
+  // Get the most recent meaningful status
+  const getLatestStatus = (): string => {
+    for (let i = activities.length - 1; i >= 0; i--) {
+      const activity = activities[i];
+      if (activity.type === 'status' || activity.type === 'step') {
+        return activity.name;
+      }
+      if (activity.name === 'WebSearch') return 'Searching the web...';
+      if (activity.name === 'Write') return 'Writing report...';
+      if (activity.name === 'WebFetch' || activity.name === 'Read') return 'Reading content...';
+    }
+    return 'Working...';
+  };
+
+  return (
+    <div className="status-indicator">
+      <Loader2 size={14} className="status-spinner" />
+      <span className="status-text">{getLatestStatus()}</span>
+    </div>
+  );
+}
+
+// === Artifact Card ===
+function ArtifactCard({ artifact, onClick }: { artifact: Artifact; onClick: () => void }) {
+  // Show helpful subtext based on artifact type
+  const getSubtext = () => {
+    if (artifact.type === 'plan') return artifact.editable ? 'Waiting for approval' : 'Plan';
+    if (artifact.type === 'report') return 'Research Report';
+    return artifact.type;
+  };
+
+  return (
+    <button className="artifact-card" onClick={onClick}>
+      <div className="artifact-card-icon"><FileText size={20} /></div>
+      <div className="artifact-card-content">
+        <span className="artifact-card-title">{artifact.title}</span>
+        <span className="artifact-card-type">{getSubtext()}</span>
+      </div>
+    </button>
+  );
+}
+
+// === Artifact Panel ===
+function ArtifactPanel({ artifact, onClose, onSave, onApprove }: {
+  artifact: Artifact;
+  onClose: () => void;
+  onSave?: (content: string) => void;
+  onApprove?: () => void;
+}) {
+  const [isEditing, setIsEditing] = useState(false);
+  const [editContent, setEditContent] = useState(artifact.content);
+
+  useEffect(() => { setEditContent(artifact.content); }, [artifact.content]);
+
+  const handleSave = () => { onSave?.(editContent); setIsEditing(false); };
+
+  return (
+    <div className="artifact-panel">
+      <div className="panel-header">
+        <div className="panel-title">
+          <FileText size={14} />
+          <span>{artifact.title}</span>
+          <span className="panel-badge">{artifact.type}</span>
+        </div>
+        <div className="panel-actions">
+          {artifact.editable && !isEditing && (
+            <button className="panel-btn" onClick={() => setIsEditing(true)}>
+              <Edit3 size={12} /> Edit
+            </button>
+          )}
+          {isEditing && (
+            <button className="panel-btn primary" onClick={handleSave}>
+              <Check size={12} /> Save
+            </button>
+          )}
+          <button className="panel-close" onClick={onClose}><X size={14} /></button>
+        </div>
+      </div>
+      <div className="panel-content">
+        {isEditing ? (
+          <textarea className="panel-editor" value={editContent} onChange={(e) => setEditContent(e.target.value)} />
+        ) : (
+          <div className="panel-preview markdown">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{artifact.content}</ReactMarkdown>
+          </div>
+        )}
+      </div>
+      {artifact.type === 'plan' && artifact.editable && onApprove && (
+        <div className="panel-footer">
+          <button className="approve-btn" onClick={onApprove}>
+            <Sparkles size={14} /> Approve & Start Research
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Clean text by removing internal markers and system messages
+function cleanInternalMarkers(text: string): string {
+  return text
+    // Remove research execution markers
+    .replace(/\[EXECUTE_RESEARCH\]/g, '')
+    .replace(/\[EXECUTE/g, '')
+    .replace(/_RESEARCH\]/g, '')
+    .replace(/RESEARCH_TASK:[^\n]*/g, '')
+    .replace(/```[\s\S]*?\[EXECUTE_RESEARCH\][\s\S]*?```/g, '')
+    // Remove approval prefixes (shown in user message, not assistant)
+    .replace(/^APPROVED:.*$/gm, '')
+    .replace(/^Plan:$/gm, '')
+    // Clean up empty code blocks
+    .replace(/```\s*```/g, '')
+    // Clean up excessive whitespace
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+// === Message Content ===
+function MessageContent({ parts, isStreaming, onArtifactClick }: {
+  parts: MessagePart[];
+  isStreaming?: boolean;
+  onArtifactClick?: (artifact: Artifact) => void;
+}) {
+  // Collect all activities for a single status indicator
+  const allActivities: Activity[] = [];
+  const contentGroups: { type: 'text' | 'artifact'; content: string; artifact?: Artifact }[] = [];
+
+  for (const part of parts) {
+    if (part.type === 'activity' && part.activities) {
+      allActivities.push(...part.activities);
+    } else if (part.type === 'artifact' && part.artifact) {
+      contentGroups.push({ type: 'artifact', content: '', artifact: part.artifact });
+    } else if (part.type === 'text') {
+      const cleanedText = cleanInternalMarkers(part.content);
+      if (cleanedText.trim()) {
+        // Merge consecutive text parts
+        const lastGroup = contentGroups[contentGroups.length - 1];
+        if (lastGroup && lastGroup.type === 'text') {
+          lastGroup.content += cleanedText;
+        } else {
+          contentGroups.push({ type: 'text', content: cleanedText });
+        }
+      }
+    }
+  }
+
+  return (
+    <div className="message-content">
+      {contentGroups.map((group, i) => {
+        if (group.type === 'text') {
+          return <div key={i} className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{group.content}</ReactMarkdown></div>;
+        }
+        if (group.type === 'artifact' && group.artifact) {
+          return <ArtifactCard key={i} artifact={group.artifact} onClick={() => onArtifactClick?.(group.artifact!)} />;
+        }
+        return null;
+      })}
+
+      {/* Single status indicator at the end when streaming */}
+      {isStreaming && allActivities.length > 0 && (
+        <StatusIndicator activities={allActivities} isStreaming={true} />
+      )}
+    </div>
+  );
+}
+
+// === Main App ===
+function MainApp() {
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [input, setInput] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [currentParts, setCurrentParts] = useState<MessagePart[]>([]);
+  const [activeThreadId, setActiveThreadId] = useState<Id<"threads"> | null>(null);
+  const [activeArtifact, setActiveArtifact] = useState<Artifact | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const isStreamingRef = useRef(false);  // Track if we're streaming
+
+  // Store artifacts separately so Convex sync doesn't kill them
+  const artifactsRef = useRef<Map<number, Artifact>>(new Map());
+
+  const createThread = useMutation(api.threads.create);
+  const sendMessage = useMutation(api.messages.send);
+  const threadMessages = useQuery(
+    api.messages.list,
+    activeThreadId ? { threadId: activeThreadId } : "skip"
+  );
+
+  // Load messages when thread changes - BUT preserve artifacts!
+  // This prevents Convex real-time updates from overwriting streaming artifacts
+  useEffect(() => {
+    // Don't sync while streaming - streaming has the authoritative data
+    if (isStreamingRef.current) {
+      return;
+    }
+
+    if (threadMessages) {
+      // When syncing from Convex, preserve any artifacts we captured during streaming
+      const loadedMessages: Message[] = threadMessages.map((msg: { role: string; content: string }, index: number) => {
+        // Clean approval messages
+        let content = msg.content;
+        if (content.startsWith('APPROVED:')) {
+          content = '✅ Approved. Starting research...';
+        }
+
+        const parts: MessagePart[] = [{ type: 'text', content }];
+
+        // Restore artifact if we have one for this message index
+        const artifact = artifactsRef.current.get(index);
+        if (artifact) {
+          parts.push({ type: 'artifact', content: '', artifact });
+        }
+
+        return {
+          role: msg.role as 'user' | 'assistant',
+          parts
+        };
+      });
+      setMessages(loadedMessages);
+    } else {
+      setMessages([]);
+      artifactsRef.current.clear();  // Clear artifacts when thread is cleared
+    }
+  }, [threadMessages]);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, currentParts]);
+
+  const handleNewThread = async () => {
+    setActiveThreadId(null);
+    setMessages([]);
+    setCurrentParts([]);
+  };
+
+  const handleSelectThread = (threadId: Id<"threads">) => {
+    setActiveThreadId(threadId);
+    setCurrentParts([]);
+    setActiveArtifact(null);
+  };
+
+  const handleTextareaChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setInput(e.target.value);
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto';
+      textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 150)}px`;
+    }
+  };
+
+  const handleSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!input.trim() || isLoading) return;
+
+    const userMessage = input.trim();
+    setInput('');
+    if (textareaRef.current) textareaRef.current.style.height = 'auto';
+
+    // Create thread if needed
+    let threadId = activeThreadId;
+    if (!threadId) {
+      const title = userMessage.slice(0, 50) + (userMessage.length > 50 ? '...' : '');
+      threadId = await createThread({ title });
+      setActiveThreadId(threadId);
+    }
+
+    // Save user message to Convex
+    await sendMessage({ threadId, role: 'user', content: userMessage });
+
+    setMessages(prev => [...prev, { role: 'user', parts: [{ type: 'text', content: userMessage }] }]);
+    setIsLoading(true);
+    setCurrentParts([]);
+
+    try {
+      // Include credentials for auth cookie
+      const chatResponse = await fetch('http://localhost:3001/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: userMessage, threadId }),
+        credentials: 'include', // Send auth cookies
+      });
+
+      const data = await chatResponse.json();
+      isStreamingRef.current = true;  // Mark streaming started
+      const eventSource = new EventSource(`http://localhost:3001/api/stream/${data.runId}`);
+      let parts: MessagePart[] = [];
+      let currentActivities: Activity[] = [];
+      let fullResponse = '';
+
+      eventSource.addEventListener('text', (event) => {
+        if (currentActivities.length > 0) {
+          parts = [...parts, { type: 'activity', content: '', activities: [...currentActivities] }];
+          currentActivities = [];
+        }
+        fullResponse += event.data;
+        const lastPart = parts[parts.length - 1];
+        if (lastPart && lastPart.type === 'text') {
+          lastPart.content += event.data;
+        } else {
+          parts = [...parts, { type: 'text', content: event.data }];
+        }
+        setCurrentParts([...parts]);
+      });
+
+      eventSource.addEventListener('tool', (event) => {
+        try {
+          const toolData = JSON.parse(event.data);
+          const isSearch = toolData.name === 'WebSearch' || toolData.name === 'WebFetch';
+          currentActivities.push({
+            type: isSearch ? 'search' : 'tool',
+            name: toolData.name,
+            detail: getToolDetail(toolData),
+          });
+          updateActivityParts(parts, currentActivities, setCurrentParts);
+        } catch { /* ignore */ }
+      });
+
+      eventSource.addEventListener('phase', (event) => {
+        currentActivities.push({ type: 'status', name: event.data });
+        updateActivityParts(parts, currentActivities, setCurrentParts);
+      });
+
+      eventSource.addEventListener('status', (event) => {
+        currentActivities.push({ type: 'step', name: event.data });
+        updateActivityParts(parts, currentActivities, setCurrentParts);
+      });
+
+      eventSource.addEventListener('artifact', (event) => {
+        try {
+          const artifactData = JSON.parse(event.data) as Artifact;
+          if (currentActivities.length > 0) {
+            parts = [...parts, { type: 'activity', content: '', activities: [...currentActivities] }];
+            currentActivities = [];
+          }
+          parts = [...parts, { type: 'artifact', content: '', artifact: artifactData }];
+          setCurrentParts([...parts]);
+
+          // Auto-open artifact panel (like Claude Code)
+          setActiveArtifact(artifactData);
+
+          // Save artifact to ref so Convex sync doesn't lose it
+          // Use the current message count as the index
+          artifactsRef.current.set(messages.length, artifactData);
+        } catch { /* ignore */ }
+      });
+
+      eventSource.addEventListener('done', async () => {
+        eventSource.close();
+        if (currentActivities.length > 0) {
+          parts = [...parts, { type: 'activity', content: '', activities: currentActivities }];
+        }
+
+        // Save assistant message to Convex
+        if (fullResponse && threadId) {
+          await sendMessage({ threadId, role: 'assistant', content: fullResponse });
+        }
+
+        setMessages(prev => [...prev, { role: 'assistant', parts: [...parts] }]);
+        setCurrentParts([]);
+        setIsLoading(false);
+        isStreamingRef.current = false;  // Mark streaming ended
+      });
+
+      eventSource.addEventListener('error', () => {
+        eventSource.close();
+        setCurrentParts([]);
+        setIsLoading(false);
+        isStreamingRef.current = false;  // Mark streaming ended
+      });
+    } catch (error) {
+      console.error('Error:', error);
+      setIsLoading(false);
+      isStreamingRef.current = false;  // Mark streaming ended
+    }
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSubmit(e as unknown as FormEvent);
+    }
+  };
+
+  const handleArtifactSave = async (content: string) => {
+    if (!activeArtifact) return;
+    try {
+      await fetch(`http://localhost:3001/api/artifacts/${activeArtifact.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content }),
+      });
+      setActiveArtifact(prev => prev ? { ...prev, content } : null);
+    } catch { /* ignore */ }
+  };
+
+  const handleApprove = async () => {
+    if (!activeArtifact || !activeThreadId) return;
+
+    // Send approval message with plan content so orchestrator has context
+    const approvalMessage = `APPROVED: Please execute the research plan.\n\nPlan:\n${activeArtifact.content}`;
+
+    setActiveArtifact(null);
+    setIsLoading(true);
+    isStreamingRef.current = true;
+
+    // Add user approval message to UI
+    setMessages(prev => [...prev, {
+      role: 'user',
+      parts: [{ type: 'text', content: '✅ Approved. Starting research...' }]
+    }]);
+
+    try {
+      // Create thread if needed
+      let threadId = activeThreadId;
+      if (!threadId) {
+        threadId = await createThread({ title: 'Research' }) as Id<"threads">;
+        setActiveThreadId(threadId);
+      }
+
+      // Save approval message to Convex
+      await sendMessage({ threadId, role: 'user', content: approvalMessage });
+
+      // Send to backend
+      const res = await fetch('http://localhost:3001/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ message: approvalMessage, threadId })
+      });
+
+      const { runId } = await res.json();
+
+      // Setup SSE stream for research results
+      let parts: MessagePart[] = [];
+      let currentActivities: Activity[] = [];
+      let fullResponse = '';
+
+      const eventSource = new EventSource(`http://localhost:3001/api/stream/${runId}`);
+
+      eventSource.addEventListener('text', (event) => {
+        fullResponse += event.data;
+        parts = [...parts, { type: 'text', content: event.data }];
+        setCurrentParts([...parts]);
+      });
+
+      eventSource.addEventListener('status', (event) => {
+        currentActivities.push({ type: 'step', name: event.data });
+        parts = [...parts, { type: 'activity', content: '', activities: [...currentActivities] }];
+        currentActivities = [];
+        setCurrentParts([...parts]);
+      });
+
+      eventSource.addEventListener('tool', (event) => {
+        try {
+          const toolData = JSON.parse(event.data);
+          currentActivities.push({ type: 'tool', name: toolData.name, detail: toolData.input?.query });
+          parts = [...parts, { type: 'activity', content: '', activities: [...currentActivities] }];
+          currentActivities = [];
+          setCurrentParts([...parts]);
+        } catch { /* ignore */ }
+      });
+
+      eventSource.addEventListener('artifact', (event) => {
+        try {
+          const artifactData = JSON.parse(event.data) as Artifact;
+          parts = [...parts, { type: 'artifact', content: '', artifact: artifactData }];
+          setCurrentParts([...parts]);
+          setActiveArtifact(artifactData);
+
+          // Save artifact to ref
+          artifactsRef.current.set(messages.length + 1, artifactData);
+        } catch { /* ignore */ }
+      });
+
+      eventSource.addEventListener('done', async () => {
+        eventSource.close();
+
+        if (fullResponse && threadId) {
+          await sendMessage({ threadId, role: 'assistant', content: fullResponse });
+        }
+
+        setMessages(prev => [...prev, { role: 'assistant', parts: [...parts] }]);
+        setCurrentParts([]);
+        setIsLoading(false);
+        isStreamingRef.current = false;
+      });
+
+      eventSource.addEventListener('error', () => {
+        eventSource.close();
+        setCurrentParts([]);
+        setIsLoading(false);
+        isStreamingRef.current = false;
+      });
+    } catch (error) {
+      console.error('Approval error:', error);
+      setIsLoading(false);
+      isStreamingRef.current = false;
+    }
+  };
+
+  return (
+    <div className={`app ${activeArtifact ? 'panel-open' : ''}`}>
+      <Sidebar
+        activeThreadId={activeThreadId}
+        onSelectThread={handleSelectThread}
+        onNewThread={handleNewThread}
+      />
+
+      <div className="main-content">
+        <header className="header">
+          <span className="logo">Research Agent</span>
+        </header>
+
+        <div className="main-container">
+          <main className="chat-area">
+            <div className="messages">
+              {messages.length === 0 && !isLoading && (
+                <div className="welcome">
+                  <div className="welcome-icon"><Sparkles size={32} /></div>
+                  <h1>Research Agent</h1>
+                  <p>Ask me to research any topic. I'll create a plan, gather information, and write a comprehensive report.</p>
+                </div>
+              )}
+
+              {messages.map((msg, i) => (
+                <div key={i} className={`message ${msg.role}`}>
+                  <MessageContent parts={msg.parts} onArtifactClick={setActiveArtifact} />
+                </div>
+              ))}
+
+              {(currentParts.length > 0 || isLoading) && (
+                <div className="message assistant">
+                  {currentParts.length > 0 ? (
+                    <MessageContent parts={currentParts} isStreaming onArtifactClick={setActiveArtifact} />
+                  ) : (
+                    <div className="thinking">
+                      <div className="thinking-dots"><span /><span /><span /></div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div ref={messagesEndRef} />
+            </div>
+          </main>
+
+          {activeArtifact && (
+            <ArtifactPanel
+              artifact={activeArtifact}
+              onClose={() => setActiveArtifact(null)}
+              onSave={handleArtifactSave}
+              onApprove={activeArtifact.type === 'plan' && activeArtifact.editable ? handleApprove : undefined}
+            />
+          )}
+        </div>
+
+        <footer className="input-area">
+          <form onSubmit={handleSubmit} className="input-form">
+            <textarea
+              ref={textareaRef}
+              value={input}
+              onChange={handleTextareaChange}
+              onKeyDown={handleKeyDown}
+              placeholder="Ask the research agent..."
+              disabled={isLoading}
+              rows={1}
+            />
+            <button type="submit" disabled={isLoading || !input.trim()}>
+              {isLoading ? <Loader2 size={18} className="spin" /> : <Send size={18} />}
+            </button>
+          </form>
+        </footer>
+      </div>
+    </div>
+  );
+}
+
+// === Root App ===
+export default function App() {
+  const { data: session, isPending, error } = useSession();
+
+  // Debug
+  console.log('Auth state:', { session, isPending, error });
+
+  if (isPending) {
+    return (
+      <div className="loading-screen">
+        <Loader2 size={32} className="spin" />
+      </div>
+    );
+  }
+
+  // Check if user is authenticated
+  if (!session?.user) {
+    return <AuthScreen />;
+  }
+
+  return <MainApp />;
+}
+
+// === Helpers ===
+function updateActivityParts(parts: MessagePart[], activities: Activity[], setter: (parts: MessagePart[]) => void) {
+  const newParts = [...parts];
+  const lastPart = newParts[newParts.length - 1];
+  if (lastPart && lastPart.type === 'activity') {
+    lastPart.activities = [...activities];
+  } else {
+    newParts.push({ type: 'activity', content: '', activities: [...activities] });
+  }
+  setter(newParts);
+}
+
+function getToolDetail(toolData: { name: string; input: Record<string, unknown> }): string {
+  const input = toolData.input;
+  switch (toolData.name) {
+    case 'Read':
+    case 'Write':
+      return String(input.file_path || '').split('/').pop() || '';
+    case 'WebSearch':
+      return String(input.query || '').slice(0, 40);
+    case 'WebFetch':
+      return String(input.url || '').replace(/^https?:\/\//, '').slice(0, 40);
+    default:
+      return '';
+  }
+}
