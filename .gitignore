@@ -16,6 +16,9 @@ logs/
 # OS files
 .DS_Store
 
+# Experimental demos (not tracked)
+claude-demos/
+
 # Generated research files (keep directories, ignore contents)
 files/research_notes/*
 !files/research_notes/.gitkeep

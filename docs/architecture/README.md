@@ -6,13 +6,13 @@ Comprehensive technical documentation for the Research Agent System.
 
 | Document | Description |
 |----------|-------------|
-| [System Overview](./01-system-overview.md) | High-level architecture and design |
+| [Hybrid Architecture](./07-hybrid-architecture.md) | **Core** - Manus-style chat + agent modes (v2) |
+| [Sandbox Hooks](./hooks.md) | Technical details on event streaming |
 | [Multi-Agent Orchestration](./02-multi-agent.md) | Agent delegation patterns |
 | [File-Based Communication](./03-file-based-communication.md) | Workspace and artifacts |
 | [Session Management](./04-sessions.md) | Session persistence and resumption |
 | [Sandbox Architecture](./05-sandbox.md) | Local vs E2B execution |
 | [Server & Streaming](./06-server-streaming.md) | Hono API and SSE |
-| [Hybrid Architecture](./07-hybrid-architecture.md) | Manus-style chat + agent modes |
 
 ## Quick Reference
 

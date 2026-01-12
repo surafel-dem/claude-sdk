@@ -24,11 +24,11 @@ interface StreamEvent {
 
 interface Artifact {
     id: string;
-    type: 'plan' | 'report';
+    type: 'plan';
     title: string;
     content: string;
     status: 'draft' | 'approved' | 'complete';
-    editable?: boolean;  // Enables approve button in UI
+    editable?: boolean;
 }
 
 // === Config ===
@@ -76,9 +76,6 @@ export async function* hybridAgentV2(
     if (orchestratorResult.needsResearch && orchestratorResult.task) {
         // Phase 2: Researcher (E2B sandbox)
         yield* researcherPhase(orchestratorResult.task, sessionId);
-
-        // Phase 3: Summary
-        yield* summaryPhase(history, prompt, orchestratorResult.response);
     }
 
     yield { type: 'done', content: 'Complete' };
@@ -107,36 +104,32 @@ async function* orchestratorPhase(
     let planEmitted = false;
     let task = '';
 
+    let yieldedResponse = '';
+
     for await (const event of stream) {
         if (event.type === 'content_block_delta' && 'delta' in event && 'text' in event.delta) {
             const text = event.delta.text;
             response += text;
 
-            // Check for research trigger - DON'T yield this to UI
-            if (response.includes('[EXECUTE_RESEARCH]')) {
+            // Don't yield ANYTHING if we are in the research trigger block
+            const currentLineRange = response.substring(yieldedResponse.length);
+
+            if (currentLineRange.includes('[EXECUTE_RESEARCH]') || currentLineRange.includes('RESEARCH_TASK:')) {
                 needsResearch = true;
-                // Extract task
                 const taskMatch = response.match(/RESEARCH_TASK:\s*(.+?)(?:\n|$)/);
-                task = taskMatch ? taskMatch[1].trim() : prompt;
-
-                // Don't yield internal markers - filter them out
-                const cleanText = text
-                    .replace(/\[EXECUTE_RESEARCH\]/g, '')
-                    .replace(/RESEARCH_TASK:[^\n]*/g, '');
-
-                if (cleanText.trim()) {
-                    yield { type: 'text', content: cleanText };
-                }
-                continue;
+                if (taskMatch) task = taskMatch[1].trim();
+                continue; // Skip yielding this chunk
             }
 
-            // Emit clean text (filter any stray markers)
+            // Regular text yielding with extra precaution
             const cleanText = text
                 .replace(/\[EXECUTE_RESEARCH\]/g, '')
-                .replace(/RESEARCH_TASK:[^\n]*/g, '');
+                .replace(/RESEARCH_TASK:[^\n]*/g, '')
+                .replace(/```\s*$/g, ''); // Don't leak the closing backticks if they are part of the trigger
 
             if (cleanText) {
                 yield { type: 'text', content: cleanText };
+                yieldedResponse += text;
             }
 
             // Emit plan artifact INLINE when we detect the pattern
@@ -152,7 +145,7 @@ async function* orchestratorPhase(
                         title: 'Research Plan',
                         content: planContent,
                         status: 'draft',
-                        editable: true,  // This enables the approve button!
+                        editable: true,
                     };
 
                     yield {
@@ -205,199 +198,89 @@ async function* researcherPhase(
         // Run with streaming - capture file paths written by the agent
         let reportContent = '';
         const writtenFiles: string[] = [];
-        let eventCount = 0;
+
+        // Event queue for real-time status yielding
+        const eventQueue: StreamEvent[] = [];
+        let isAgentRunning = true;
 
         log('Researcher', 'Starting agent execution...');
 
-        const result = await sandbox.commands.run('node /home/user/agent.mjs', {
+        // Start agent execution in background so we can yield events
+        const agentRunPromise = sandbox.commands.run('node /home/user/agent.mjs', {
             timeoutMs: 5 * 60 * 1000,
-            onStdout: (line) => {
-                eventCount++;
+            onStdout: (line: string) => {
                 try {
                     const msg = JSON.parse(line);
 
-                    // Log ALL events for debugging
-                    if (msg.type) {
-                        log('Researcher', `[Event ${eventCount}] ${msg.type}: ${JSON.stringify(msg).slice(0, 150)}...`);
+                    // Capture tool calls from hooks for real-time updates
+                    if (msg.type === 'tool_call') {
+                        eventQueue.push({
+                            type: 'tool',
+                            content: msg.name,
+                            data: { name: msg.name, input: msg.input }
+                        });
                     }
 
-                    // Capture file paths from our PostToolUse hook
+                    // Capture file paths for report tracking
                     if (msg.type === 'file_written' && msg.path) {
-                        log('Researcher', `>>> FILE WRITTEN: ${msg.path}`);
                         writtenFiles.push(msg.path);
                     }
 
-                    // Capture write detection
-                    if (msg.type === 'write_detected') {
-                        log('Researcher', `>>> WRITE DETECTED: ${JSON.stringify(msg)}`);
-                    }
-
-                    // Capture pre_tool for Write
-                    if (msg.type === 'pre_tool' && msg.tool === 'Write') {
-                        log('Researcher', `>>> PRE WRITE: ${JSON.stringify(msg.input)}`);
-                    }
-
-                    // Capture files summary at end
+                    // Aggregated file summary
                     if (msg.type === 'files_summary' && msg.files) {
-                        log('Researcher', `>>> FILES SUMMARY: ${msg.files.join(', ')}`);
                         for (const f of msg.files) {
                             if (!writtenFiles.includes(f)) writtenFiles.push(f);
                         }
                     }
-
-                    if (msg.type === 'assistant' && msg.message?.content) {
-                        // Tool use detection
-                        for (const block of msg.message.content) {
-                            if (block.type === 'tool_use') {
-                                log('Researcher', `Tool: ${block.name}`);
-                            }
-                        }
-                    }
-                } catch {
-                    // Not JSON - log raw output
-                    if (line.trim()) {
-                        log('Researcher', `[Raw] ${line.slice(0, 100)}`);
-                    }
-                }
+                } catch { /* ignore non-JSON */ }
             },
-            onStderr: (line) => log('Researcher', `stderr: ${line}`),
+            onStderr: (line: string) => log('Researcher', `stderr: ${line}`),
+        }).then(result => {
+            isAgentRunning = false;
+            return result;
+        }).catch(err => {
+            isAgentRunning = false;
+            throw err;
         });
 
-        log('Researcher', `Agent finished. Exit code: ${result.exitCode}, Events: ${eventCount}`);
-
-        // Log what files were written
-        if (writtenFiles.length > 0) {
-            log('Researcher', `Files written by agent: ${writtenFiles.join(', ')}`);
-        } else {
-            log('Researcher', 'No file_written events captured from hooks');
+        // Loop to yield events while agent is running
+        while (isAgentRunning || eventQueue.length > 0) {
+            if (eventQueue.length > 0) {
+                const event = eventQueue.shift();
+                if (event) yield event;
+            } else {
+                // Short wait to avoid busy loop
+                await new Promise(r => setTimeout(r, 100));
+            }
         }
 
-        // ===========================================
-        // COMPREHENSIVE DEBUG: Find where report.md is
-        // ===========================================
-        log('Researcher', '=== BEGIN FILE SEARCH ===');
+        const result = await agentRunPromise;
+        log('Researcher', `Agent finished. Exit code: ${result.exitCode}`);
 
-        // Check workspace
+        // Try to find report.md ANYWHERE in the sandbox (including .claude directory)
         try {
-            const lsWorkspace = await sandbox.commands.run(`ls -la ${E2B_WORKSPACE}`);
-            log('Researcher', `[1/5] Workspace ${E2B_WORKSPACE}:\n${lsWorkspace.stdout}`);
-        } catch (e) {
-            log('Researcher', `[1/5] Workspace error: ${e}`);
-        }
+            const findResult = await sandbox.commands.run('find /home/user -name "report.md" 2>/dev/null | head -1');
+            const reportPath = findResult.stdout.trim();
 
-        // Check home directory
-        try {
-            const lsHome = await sandbox.commands.run('ls -la /home/user');
-            log('Researcher', `[2/5] Home /home/user:\n${lsHome.stdout}`);
-        } catch (e) {
-            log('Researcher', `[2/5] Home error: ${e}`);
-        }
-
-        // Check .claude directory (THIS IS WHERE SDK WRITES!)
-        try {
-            const lsClaude = await sandbox.commands.run('ls -laR /home/user/.claude 2>/dev/null | head -50');
-            log('Researcher', `[3/5] .claude directory:\n${lsClaude.stdout}`);
-        } catch (e) {
-            log('Researcher', `[3/5] .claude error: ${e}`);
-        }
-
-        // Use find to locate ANY .md files
-        try {
-            const findMd = await sandbox.commands.run('find /home/user -name "*.md" -type f 2>/dev/null');
-            log('Researcher', `[4/5] All .md files found:\n${findMd.stdout || '(none)'}`);
-        } catch (e) {
-            log('Researcher', `[4/5] Find .md error: ${e}`);
-        }
-
-        // Specifically find report.md
-        try {
-            const findReport = await sandbox.commands.run('find /home/user -name "report.md" -type f 2>/dev/null');
-            log('Researcher', `[5/5] report.md locations:\n${findReport.stdout || '(none found)'}`);
-        } catch (e) {
-            log('Researcher', `[5/5] Find report.md error: ${e}`);
-        }
-
-        log('Researcher', '=== END FILE SEARCH ===');
-
-
-        // Check for report - try both possible locations
-        try {
-            reportContent = await sandbox.files.read(`${E2B_WORKSPACE}/report.md`);
-            writeLocal('report.md', reportContent);
-            log('Researcher', 'Report downloaded from workspace');
-
-            // Emit report artifact INLINE
-            const artifact: Artifact = {
-                id: `report-${Date.now()}`,
-                type: 'report',
-                title: 'Research Report',
-                content: reportContent,
-                status: 'complete',
-            };
-
-            yield { type: 'status', content: 'Research complete!' };
-            yield {
-                type: 'artifact',
-                content: JSON.stringify(artifact),
-                data: artifact
-            };
-        } catch {
-            // Try home directory
-            try {
-                reportContent = await sandbox.files.read('/home/user/report.md');
+            if (reportPath) {
+                log('Researcher', `Found report at: ${reportPath}`);
+                reportContent = await sandbox.files.read(reportPath);
                 writeLocal('report.md', reportContent);
-                log('Researcher', 'Report downloaded from home');
-
-                const artifact: Artifact = {
-                    id: `report-${Date.now()}`,
-                    type: 'report',
-                    title: 'Research Report',
-                    content: reportContent,
-                    status: 'complete',
-                };
+                log('Researcher', 'Report downloaded successfully');
 
                 yield { type: 'status', content: 'Research complete!' };
-                yield {
-                    type: 'artifact',
-                    content: JSON.stringify(artifact),
-                    data: artifact
-                };
-            } catch {
-                // Try to find report.md ANYWHERE in the sandbox (including .claude directory)
-                try {
-                    log('Researcher', 'Searching for report.md in all locations...');
-                    const findResult = await sandbox.commands.run('find /home/user -name "report.md" 2>/dev/null | head -1');
-                    const reportPath = findResult.stdout.trim();
 
-                    if (reportPath) {
-                        log('Researcher', `Found report at: ${reportPath}`);
-                        reportContent = await sandbox.files.read(reportPath);
-                        writeLocal('report.md', reportContent);
-                        log('Researcher', 'Report downloaded successfully');
-
-                        const artifact: Artifact = {
-                            id: `report-${Date.now()}`,
-                            type: 'report',
-                            title: 'Research Report',
-                            content: reportContent,
-                            status: 'complete',
-                        };
-
-                        yield { type: 'status', content: 'Research complete!' };
-                        yield {
-                            type: 'artifact',
-                            content: JSON.stringify(artifact),
-                            data: artifact
-                        };
-                    } else {
-                        log('Researcher', 'No report.md found anywhere in sandbox');
-                        yield { type: 'status', content: 'Research completed (no report generated)' };
-                    }
-                } catch (findError) {
-                    log('Researcher', `Find command failed: ${findError}`);
-                    yield { type: 'status', content: 'Research completed (no report generated)' };
-                }
+                // Stream report content directly as text
+                yield { type: 'text', content: '\n\n' };
+                yield { type: 'text', content: reportContent };
+                yield { type: 'text', content: '\n\n' };
+            } else {
+                log('Researcher', 'No report.md found anywhere in sandbox');
+                yield { type: 'status', content: 'Research completed (no report generated)' };
             }
+        } catch (findError) {
+            log('Researcher', `Find command failed: ${findError}`);
+            yield { type: 'status', content: 'Research completed (no report generated)' };
         }
 
         // Pause sandbox for reuse
@@ -405,59 +288,13 @@ async function* researcherPhase(
             await Sandbox.betaPause(sandbox.sandboxId);
             if (sessionId) sandboxStore.set(sessionId, sandbox.sandboxId);
         } catch {
-            await Sandbox.kill(sandbox.sandboxId);
+            await Sandbox.kill(sandbox.sandboxId).catch(() => { });
         }
 
     } catch (error) {
         log('Researcher', 'Error', { error: String(error) });
         yield { type: 'error', content: `Research failed: ${error}` };
-        await Sandbox.kill(sandbox.sandboxId).catch(() => { });
-    }
-}
-
-// === Phase 3: Summary ===
-async function* summaryPhase(
-    history: Array<{ role: 'user' | 'assistant'; content: string }>,
-    originalPrompt: string,
-    _orchestratorResponse: string  // Not used - we use the report!
-): AsyncGenerator<StreamEvent> {
-    log('Summary', 'Phase 3: Generating summary');
-
-    const report = readLocal('report.md');
-
-    // Only generate summary if we have a report
-    if (!report) {
-        log('Summary', 'No report found, skipping summary');
-        yield { type: 'text', content: '\n\nResearch completed but no report was generated.' };
-        return;
-    }
-
-    yield { type: 'status', content: 'Summarizing findings...' };
-
-    // Create a focused summary prompt  
-    const summaryPrompt = `Based on this research report, provide a brief 2-3 sentence summary of the key findings. Be concise.
-
----
-${report}
----
-
-Summary:`;
-
-    const stream = anthropic.messages.stream({
-        model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-20250514',
-        max_tokens: 512,
-        messages: [
-            { role: 'user' as const, content: originalPrompt },
-            { role: 'user' as const, content: summaryPrompt }
-        ],
-    });
-
-    yield { type: 'text', content: '\n\n**Summary:** ' };
-
-    for await (const event of stream) {
-        if (event.type === 'content_block_delta' && 'delta' in event && 'text' in event.delta) {
-            yield { type: 'text', content: event.delta.text };
-        }
+        if (sandbox) await Sandbox.kill(sandbox.sandboxId).catch(() => { });
     }
 }
 
@@ -522,41 +359,23 @@ const config = {
     permissionMode: 'acceptEdits',
     model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-20250514',
     cwd: '${E2B_WORKSPACE}',
+    resume: process.env.AGENT_SESSION_ID || undefined,
     hooks: {
-        PreToolUse: [{
-            hooks: [async (input, toolUseId, context) => {
-                console.log(JSON.stringify({ 
-                    type: 'pre_tool', 
-                    tool: input.tool_name,
-                    input: input.tool_input
-                }));
-                return {};
-            }]
-        }],
         PostToolUse: [{
             hooks: [async (input, toolUseId, context) => {
+                // Return tool events for UI
                 console.log(JSON.stringify({ 
-                    type: 'post_tool', 
-                    tool: input.tool_name,
-                    response: typeof input.tool_response === 'string' 
-                        ? input.tool_response.slice(0, 200) 
-                        : JSON.stringify(input.tool_response).slice(0, 200)
+                    type: 'tool_call', 
+                    name: input.tool_name,
+                    input: input.tool_input
                 }));
                 
                 // Track when Write tool is used
                 if (input.tool_name === 'Write') {
                     const filePath = input.tool_input?.file_path || input.tool_input?.path || input.tool_input?.filename;
-                    console.log(JSON.stringify({ 
-                        type: 'write_detected', 
-                        input: input.tool_input,
-                        path: filePath
-                    }));
                     if (filePath) {
                         writtenFiles.push(filePath);
-                        console.log(JSON.stringify({ 
-                            type: 'file_written', 
-                            path: filePath 
-                        }));
+                        console.log(JSON.stringify({ type: 'file_written', path: filePath }));
                     }
                 }
                 return {};

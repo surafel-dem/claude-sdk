@@ -568,42 +568,123 @@ body {
 }
 
 
-/* === Status Indicator (Cursor AI Style) === */
+/* === Status Indicator & Tool Logs === */
 .status-indicator {
-  display: inline-flex;
+  margin: 12px 0;
+  border-radius: 8px;
+  overflow: hidden;
+  transition: all 0.2s ease;
+}
+
+.status-header {
+  display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 14px;
-  background: linear-gradient(135deg, var(--bg-secondary) 0%, var(--bg-tertiary) 100%);
-  border: 1px solid var(--accent);
-  border-radius: 20px;
-  margin: 12px 0;
-  animation: shimmer 2s ease-in-out infinite;
+  padding: 4px 0;
+  cursor: pointer;
 }
 
-.status-spinner {
-  color: var(--accent);
-  animation: spin 1s linear infinite;
+.status-shimmer {
+  font-size: 13.5px;
+  font-weight: 400;
+  letter-spacing: -0.01em;
+  background: linear-gradient(90deg,
+      var(--text-secondary) 0%,
+      var(--text-secondary) 40%,
+      var(--text-primary) 50%,
+      var(--text-secondary) 60%,
+      var(--text-secondary) 100%);
+  background-size: 200% auto;
+  color: transparent;
+  background-clip: text;
+  -webkit-background-clip: text;
+  animation: shimmer-flow 3s linear infinite;
 }
 
-.status-text {
-  font-size: 13px;
-  color: var(--text-primary);
-  font-weight: 500;
-}
+@keyframes shimmer-flow {
+  0% {
+    background-position: 200% center;
+  }
 
-@keyframes shimmer {
-
-  0%,
   100% {
-    opacity: 1;
-    box-shadow: 0 0 8px rgba(14, 165, 233, 0.3);
+    background-position: -200% center;
+  }
+}
+
+.status-text-finished {
+  font-size: 13.5px;
+  font-weight: 400;
+  letter-spacing: -0.01em;
+  color: var(--text-tertiary);
+  opacity: 0.8;
+}
+
+.tool-logs {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 0 8px 24px;
+  margin-top: 4px;
+}
+
+.tool-log-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-tertiary);
+  animation: slide-in 0.2s ease-out;
+  position: relative;
+}
+
+.tool-log-item::before {
+  content: "•";
+  color: var(--border);
+  position: absolute;
+  left: -14px;
+}
+
+.tool-log-content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.tool-log-name {
+  color: var(--text-secondary);
+  font-weight: 450;
+  white-space: nowrap;
+}
+
+.tool-log-detail {
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0.6;
+}
+
+@keyframes slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(-4px);
   }
 
-  50% {
-    opacity: 0.85;
-    box-shadow: 0 0 16px rgba(14, 165, 233, 0.5);
+  to {
+    opacity: 1;
+    transform: translateX(0);
   }
+}
+
+.status-chevron {
+  transition: transform 0.2s ease;
+  color: var(--text-tertiary);
+}
+
+.status-chevron.open {
+  transform: rotate(90deg);
 }
 
 @keyframes spin {

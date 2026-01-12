@@ -28,11 +28,11 @@ const getThreadHistory = httpAction(async (ctx, request) => {
     }
 
     try {
-        // Fetch messages for thread
-        const messages = await ctx.runQuery("messages:list" as any, { threadId });
+        // Fetch messages for thread using internal query
+        const messages = await ctx.runQuery("internal:listMessagesInternal" as any, { threadId });
 
-        // Fetch artifacts for thread  
-        const artifacts = await ctx.runQuery("artifacts:listByThread" as any, { threadId });
+        // Fetch artifacts for thread using internal query
+        const artifacts = await ctx.runQuery("internal:listArtifactsInternal" as any, { threadId });
 
         return new Response(
             JSON.stringify({

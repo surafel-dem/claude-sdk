@@ -4,7 +4,7 @@ import { api } from '@convex/_generated/api';
 import type { Id } from '@convex/_generated/dataModel';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Send, Loader2, FileText, X, Check, Edit3, Sparkles, Plus, MessageSquare, Trash2, LogOut } from 'lucide-react';
+import { Send, Loader2, FileText, X, Check, Edit3, Sparkles, Plus, MessageSquare, Trash2, LogOut, ChevronRight } from 'lucide-react';
 import { useSession, signIn, signUp, signOut } from './lib/auth-client';
 import './App.css';
 
@@ -18,7 +18,7 @@ interface Activity {
 
 interface Artifact {
   id: string;
-  type: 'plan' | 'report' | 'document';
+  type: 'plan';
   title: string;
   content: string;
   editable?: boolean;
@@ -233,30 +233,53 @@ function Sidebar({
   );
 }
 
-// === Status Indicator (Cursor AI Style) ===
-// Single shimmer text that updates in place - no stacking, no expansion
+// === Status Indicator (Cursor & Motion Primitives Style) ===
 function StatusIndicator({ activities, isStreaming }: { activities: Activity[]; isStreaming?: boolean }) {
-  if (activities.length === 0) return null;
-  if (!isStreaming) return null;  // Only show when actively streaming
+  const [isOpen, setIsOpen] = useState(isStreaming ?? false);
 
-  // Get the most recent meaningful status
-  const getLatestStatus = (): string => {
-    for (let i = activities.length - 1; i >= 0; i--) {
-      const activity = activities[i];
-      if (activity.type === 'status' || activity.type === 'step') {
-        return activity.name;
-      }
-      if (activity.name === 'WebSearch') return 'Searching the web...';
-      if (activity.name === 'Write') return 'Writing report...';
-      if (activity.name === 'WebFetch' || activity.name === 'Read') return 'Reading content...';
+  if (activities.length === 0) return null;
+
+  useEffect(() => {
+    if (isStreaming === false) {
+      const timer = setTimeout(() => setIsOpen(false), 1500);
+      return () => clearTimeout(timer);
+    } else if (isStreaming === true) {
+      setIsOpen(true);
     }
-    return 'Working...';
+  }, [isStreaming]);
+
+  const getLatestStatus = (): string => {
+    const latest = activities[activities.length - 1];
+    if (isStreaming) {
+      if (latest.name === 'WebSearch') return 'Searching the web...';
+      if (latest.name === 'Write') return 'Writing report...';
+      if (latest.name === 'WebFetch' || latest.name === 'Read') return 'Reading content...';
+      return latest.name || 'Thinking...';
+    }
+    return 'Research complete';
   };
 
   return (
-    <div className="status-indicator">
-      <Loader2 size={14} className="status-spinner" />
-      <span className="status-text">{getLatestStatus()}</span>
+    <div className={`status-indicator ${isOpen ? 'open' : ''}`}>
+      <div className="status-header" onClick={() => setIsOpen(!isOpen)}>
+        <ChevronRight size={14} className={`status-chevron ${isOpen ? 'open' : ''}`} />
+        <span className={isStreaming ? "status-shimmer" : "status-text-finished"}>
+          {getLatestStatus()}
+        </span>
+      </div>
+
+      {isOpen && (
+        <div className="tool-logs">
+          {activities.map((activity, i) => (
+            <div key={i} className="tool-log-item">
+              <div className="tool-log-content">
+                <span className="tool-log-name">{activity.name}</span>
+                {activity.detail && <span className="tool-log-detail">{activity.detail}</span>}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -340,18 +363,19 @@ function ArtifactPanel({ artifact, onClose, onSave, onApprove }: {
 // Clean text by removing internal markers and system messages
 function cleanInternalMarkers(text: string): string {
   return text
-    // Remove research execution markers
+    // Remove internal execution markers
     .replace(/\[EXECUTE_RESEARCH\]/g, '')
-    .replace(/\[EXECUTE/g, '')
-    .replace(/_RESEARCH\]/g, '')
     .replace(/RESEARCH_TASK:[^\n]*/g, '')
     .replace(/```[\s\S]*?\[EXECUTE_RESEARCH\][\s\S]*?```/g, '')
-    // Remove approval prefixes (shown in user message, not assistant)
+    // Remove approval messages
+    .replace(/✅ Approved. Starting research.../g, '')
     .replace(/^APPROVED:.*$/gm, '')
+    .replace(/^\d+$/gm, '') // Remove stray turn counts/numbers
+    // Clean strings like "Plan:" or "Ready to research"
     .replace(/^Plan:$/gm, '')
-    // Clean up empty code blocks
+    .replace(/Ready to research.*$/gm, '')
+    // Clean up empty containers
     .replace(/```\s*```/g, '')
-    // Clean up excessive whitespace
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 }
@@ -397,9 +421,9 @@ function MessageContent({ parts, isStreaming, onArtifactClick }: {
         return null;
       })}
 
-      {/* Single status indicator at the end when streaming */}
-      {isStreaming && allActivities.length > 0 && (
-        <StatusIndicator activities={allActivities} isStreaming={true} />
+      {/* Status indicator for research steps */}
+      {allActivities.length > 0 && (
+        <StatusIndicator activities={allActivities} isStreaming={isStreaming} />
       )}
     </div>
   );
@@ -438,10 +462,10 @@ function MainApp() {
     if (threadMessages) {
       // When syncing from Convex, preserve any artifacts we captured during streaming
       const loadedMessages: Message[] = threadMessages.map((msg: { role: string; content: string }, index: number) => {
-        // Clean approval messages
+        // Hide approval messages completely from display
         let content = msg.content;
         if (content.startsWith('APPROVED:')) {
-          content = '✅ Approved. Starting research...';
+          content = ''; // Hide the internal approval message
         }
 
         const parts: MessagePart[] = [{ type: 'text', content }];

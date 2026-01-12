@@ -18,7 +18,7 @@ import { existsSync, unlinkSync, mkdirSync } from 'fs';
 import { getMode } from './sandbox/index.js';
 import { hybridAgent } from './sandbox/hybrid-v2.js';
 import { authMiddleware, getAuthUser, type AuthVariables } from './middleware/auth.js';
-import { createArtifact } from './lib/convex.js';
+import { createArtifact, getThreadHistory } from './lib/convex.js';
 
 const app = new Hono<{ Variables: AuthVariables }>();
 
@@ -60,7 +60,43 @@ app.post('/api/chat', async (c) => {
     }
 
     const runId = existingRunId || randomUUID();
+    const isNewSession = !sessions.has(runId);
     const session = sessions.get(runId) || { history: [] };
+
+    // If it's a new session for an existing thread, load history from Convex
+    if (isNewSession && threadId && session.history.length === 0) {
+        try {
+            const history = await getThreadHistory(threadId);
+            if (history) {
+                // Convert Convex messages to agent history
+                const messages = history.messages.map(m => ({
+                    role: m.role as 'user' | 'assistant',
+                    content: m.content
+                }));
+
+                // Add artifacts as system-like context if they exist
+                if (history.artifacts.length > 0) {
+                    const artifactsSummary = history.artifacts.map(a =>
+                        `[PAST ARTIFACT: ${a.type.toUpperCase()}] ${a.title}\nContent:\n${a.content}`
+                    ).join('\n\n---\n\n');
+
+                    messages.unshift({
+                        role: 'user',
+                        content: `CONTEXT: Here are the artifacts from our previous research in this thread:\n\n${artifactsSummary}\n\nPlease keep these in mind for our future interactions.`
+                    });
+                    messages.push({
+                        role: 'assistant',
+                        content: "I've reviewed the previous research and artifacts. I'm ready to continue."
+                    });
+                }
+
+                session.history = messages;
+                console.log(`[Server] Loaded ${session.history.length} messages from Convex history`);
+            }
+        } catch (error) {
+            console.error('[Server] Error loading history:', error);
+        }
+    }
 
     session.pendingMessage = message;
     session.threadId = threadId;
