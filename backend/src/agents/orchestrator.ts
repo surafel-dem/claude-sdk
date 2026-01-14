@@ -2,19 +2,18 @@
  * SDK Orchestrator — Clean Two-Phase Implementation
  * 
  * Phase 1: Planning - Create plan, emit artifact, store for Phase 2
- * Phase 2: Research - Runs in E2B sandbox after approval
+ * Phase 2: Research - Routes to local or sandbox runner based on mode
  * 
  * State is managed per-run, enabling clean phase transitions.
  */
 
 import { query, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
-import type { Sandbox } from '@e2b/code-interpreter';
-import { getSandbox, setupSandbox, pause } from '../sandbox/sandbox-manager.js';
-import { RESEARCHER_PROMPT } from '../prompts/researcher.js';
+
 
 // Run state management
 interface RunState {
     phase: 'planning' | 'awaiting_approval' | 'researching' | 'done';
+    mode: 'local' | 'sandbox';
     originalPrompt: string;
     plan?: string;
 }
@@ -38,9 +37,10 @@ export type StreamEvent = {
 /**
  * Initialize a run
  */
-export function initRun(runId: string, prompt: string): void {
+export function initRun(runId: string, prompt: string, mode: 'local' | 'sandbox' = 'local'): void {
     runStates.set(runId, {
         phase: 'planning',
+        mode,
         originalPrompt: prompt,
     });
 }
@@ -125,7 +125,7 @@ export async function* runPlanning(runId: string): AsyncGenerator<StreamEvent> {
 }
 
 /**
- * Phase 2: Research (E2B Sandbox)
+ * Phase 2: Research — Routes to local or sandbox based on mode
  */
 export async function* runResearch(runId: string): AsyncGenerator<StreamEvent> {
     const state = runStates.get(runId);
@@ -139,93 +139,24 @@ export async function* runResearch(runId: string): AsyncGenerator<StreamEvent> {
         return;
     }
 
-    yield { type: 'status', content: 'Starting research in sandbox...' };
+    const task = `Research: ${state.originalPrompt}\n\nPlan:\n${state.plan || 'No plan provided'}`;
+    console.log(`[orchestrator] Running in ${state.mode} mode`);
 
-    let sandbox: Sandbox | null = null;
-    try {
-        const result = await getSandbox(runId);
-        sandbox = result.sandbox;
-
-        // Setup SDK if using base template (needsSetup = true)
-        if (result.needsSetup) {
-            yield { type: 'status', content: 'Installing research tools (~30s)...' };
-            await setupSandbox(sandbox);
-        }
-
-        yield { type: 'phase', content: 'researcher' };
-
-        // Run researcher in E2B
-        const task = `Research: ${state.originalPrompt}\n\nPlan:\n${state.plan || 'No plan provided'}`;
-        const script = generateResearcherScript(task);
-
-        await sandbox.files.write('/home/user/agent.mjs', script);
-        await sandbox.commands.run('mkdir -p /home/user/workspace');
-
-        yield { type: 'status', content: 'Searching the web...' };
-
-        // CRITICAL: Run from /home/user where node_modules exists
-        await sandbox.commands.run('cd /home/user && node agent.mjs', {
-            timeoutMs: 5 * 60 * 1000,
-            onStdout: (line) => {
-                try {
-                    const msg = JSON.parse(line) as SDKMessage;
-                    if (msg.type === 'assistant' && msg.message?.content) {
-                        for (const block of msg.message.content) {
-                            if ('name' in block) {
-                                // Will be logged, but we can't yield from callback
-                                console.log(`[researcher] Tool: ${block.name}`);
-                            }
-                        }
-                    }
-                } catch {
-                    if (line.trim()) console.log('[sandbox]', line);
-                }
-            },
-            onStderr: (line) => {
-                if (line.trim()) console.error('[sandbox error]', line);
-            }
-        });
-
-        // Find and read report (agent may write anywhere)
-        try {
-            console.log('[orchestrator] Searching for report.md...');
-            const findResult = await sandbox.commands.run('find /home/user -name "report.md" 2>/dev/null | head -1');
-            const reportPath = findResult.stdout.trim();
-
-            if (reportPath) {
-                console.log(`[orchestrator] Found report at: ${reportPath}`);
-                const report = await sandbox.files.read(reportPath);
-                console.log(`[orchestrator] Report read successfully (${report.length} chars)`);
-                yield {
-                    type: 'artifact',
-                    content: JSON.stringify({
-                        type: 'report',
-                        title: 'Research Report',
-                        content: report,
-                    })
-                };
-                yield { type: 'text', content: report };
-            } else {
-                console.log('[orchestrator] No report.md found');
-                yield { type: 'error', content: 'No report generated' };
-            }
-        } catch (err) {
-            console.error('[orchestrator] Failed to read report:', err);
-            yield { type: 'error', content: 'Failed to read report' };
-        }
-
-        state.phase = 'done';
-
-    } finally {
-        if (sandbox) {
-            await pause(sandbox.sandboxId);
-        }
+    // Route to appropriate runner
+    if (state.mode === 'local') {
+        const { runLocal } = await import('./local-runner.js');
+        yield* runLocal(task, runId);  // Pass runId for session isolation
+    } else {
+        const { runSandbox } = await import('./sandbox-runner.js');
+        yield* runSandbox(task);
     }
 
-    yield { type: 'done', content: 'complete' };
+    state.phase = 'done';
 }
 
-/** Translate SDK message to stream events */
+/**
+ * Translate SDK message to stream events
+ */
 function translateMessage(msg: SDKMessage): StreamEvent[] {
     const events: StreamEvent[] = [];
 
@@ -245,25 +176,4 @@ function translateMessage(msg: SDKMessage): StreamEvent[] {
     }
 
     return events;
-}
-
-/** Generate researcher script for E2B */
-function generateResearcherScript(task: string): string {
-    return `
-import { query } from '@anthropic-ai/claude-agent-sdk';
-
-for await (const msg of query({
-    prompt: ${JSON.stringify(task)},
-    options: {
-        systemPrompt: ${JSON.stringify(RESEARCHER_PROMPT)},
-        allowedTools: ['WebSearch', 'Write'],
-        maxTurns: 5,
-        model: 'haiku',
-        cwd: '/home/user/workspace',
-        permissionMode: 'acceptEdits',
-    }
-})) {
-    console.log(JSON.stringify(msg));
-}
-`;
 }

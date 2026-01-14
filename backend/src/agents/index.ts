@@ -11,4 +11,6 @@ export {
     type StreamEvent
 } from './orchestrator.js';
 
-export { researcher, reportWriter } from './subagents.js';
+export { runLocal } from './local-runner.js';
+export { runSandbox } from './sandbox-runner.js';
+

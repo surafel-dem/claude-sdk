@@ -33,12 +33,17 @@ app.get('/health', c => c.json({ status: 'ok' }));
  * POST /api/chat — Initialize run
  */
 app.post('/api/chat', async c => {
-    const { message, threadId } = await c.req.json<{ message: string; threadId?: string }>();
+    const { message, threadId, mode } = await c.req.json<{
+        message: string;
+        threadId?: string;
+        mode?: 'local' | 'sandbox'
+    }>();
     if (!message) return c.json({ error: 'Message required' }, 400);
 
     const runId = threadId || crypto.randomUUID();
-    initRun(runId, message);
+    initRun(runId, message, mode || 'local');
 
+    console.log(`[server] Run initialized: ${runId} (mode: ${mode || 'local'})`);
     return c.json({ runId, threadId: runId });
 });
 
@@ -106,15 +111,28 @@ app.post('/api/continue/:runId', async c => {
 
     // Stream Phase 2 (Research)
     return streamSSE(c, async stream => {
+        console.log(`[sse] Starting SSE stream for runId: ${runId}`);
+        let eventCount = 0;
+
         try {
             for await (const event of runResearch(runId)) {
+                eventCount++;
+
+                // For tool events, send the full data as JSON
+                const data = event.type === 'tool' && event.data
+                    ? JSON.stringify(event.data)
+                    : event.content || '';
+
+                console.log(`[sse] Event #${eventCount}: ${event.type} -> ${data.slice(0, 80)}...`);
+
                 await stream.writeSSE({
                     event: event.type,
-                    data: event.content || ''
+                    data
                 });
             }
+            console.log(`[sse] Stream complete. Total events: ${eventCount}`);
         } catch (error) {
-            console.error('[research error]', error);
+            console.error('[sse] Stream error:', error);
             await stream.writeSSE({ event: 'error', data: String(error) });
         }
     });

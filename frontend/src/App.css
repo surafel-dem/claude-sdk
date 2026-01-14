@@ -1119,6 +1119,38 @@ body {
   cursor: not-allowed;
 }
 
+/* === Mode Selector === */
+.mode-selector {
+  max-width: 720px;
+  margin: 8px auto 0;
+  display: flex;
+  gap: 4px;
+}
+
+.mode-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.mode-btn:hover {
+  color: var(--text-secondary);
+}
+
+.mode-btn.active {
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+  border-color: var(--border);
+}
+
 /* === Animations === */
 .spin {
   animation: spin 1s linear infinite;

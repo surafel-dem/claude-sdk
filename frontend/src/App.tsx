@@ -4,7 +4,7 @@ import { api } from '@convex/_generated/api';
 import type { Id } from '@convex/_generated/dataModel';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Send, Loader2, FileText, X, Check, Edit3, Sparkles, Plus, MessageSquare, Trash2, LogOut, ChevronRight, AlertCircle } from 'lucide-react';
+import { Send, Loader2, FileText, X, Check, Edit3, Sparkles, Plus, MessageSquare, Trash2, LogOut, ChevronRight, AlertCircle, Monitor, Cloud } from 'lucide-react';
 import { useSession, signIn, signUp, signOut } from './lib/auth-client';
 import './App.css';
 
@@ -266,53 +266,33 @@ function Sidebar({
   );
 }
 
-// === Status Indicator (Cursor & Motion Primitives Style) ===
+// === Status Indicator (Simple) ===
 function StatusIndicator({ activities, isStreaming }: { activities: Activity[]; isStreaming?: boolean }) {
-  const [isOpen, setIsOpen] = useState(isStreaming ?? false);
-
   if (activities.length === 0) return null;
 
-  useEffect(() => {
-    if (isStreaming === false) {
-      const timer = setTimeout(() => setIsOpen(false), 1500);
-      return () => clearTimeout(timer);
-    } else if (isStreaming === true) {
-      setIsOpen(true);
-    }
-  }, [isStreaming]);
+  // Get the latest status-like activity
+  const getStatus = (): string => {
+    const steps = activities.filter(a => a.type === 'step');
+    if (steps.length > 0) return steps[steps.length - 1].name;
 
-  const getLatestStatus = (): string => {
-    const latest = activities[activities.length - 1];
-    if (isStreaming) {
-      if (latest.name === 'WebSearch') return 'Searching the web...';
-      if (latest.name === 'Write') return 'Writing report...';
-      if (latest.name === 'WebFetch' || latest.name === 'Read') return 'Reading content...';
-      return latest.name || 'Thinking...';
+    const searches = activities.filter(a => a.type === 'search');
+    if (searches.length > 0 && isStreaming) {
+      return `Searching (${searches.length})...`;
     }
-    return 'Research complete';
+
+    const tools = activities.filter(a => a.type === 'tool');
+    if (tools.length > 0 && isStreaming) {
+      return tools[tools.length - 1].name;
+    }
+
+    return isStreaming ? 'Working...' : 'Complete';
   };
 
   return (
-    <div className={`status-indicator ${isOpen ? 'open' : ''}`}>
-      <div className="status-header" onClick={() => setIsOpen(!isOpen)}>
-        <ChevronRight size={14} className={`status-chevron ${isOpen ? 'open' : ''}`} />
-        <span className={isStreaming ? "status-shimmer" : "status-text-finished"}>
-          {getLatestStatus()}
-        </span>
-      </div>
-
-      {isOpen && (
-        <div className="tool-logs">
-          {activities.map((activity, i) => (
-            <div key={i} className="tool-log-item">
-              <div className="tool-log-content">
-                <span className="tool-log-name">{activity.name}</span>
-                {activity.detail && <span className="tool-log-detail">{activity.detail}</span>}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
+    <div className="status-indicator">
+      <span className={isStreaming ? "status-shimmer" : "status-text-finished"}>
+        {getStatus()}
+      </span>
     </div>
   );
 }
@@ -475,6 +455,7 @@ function MainApp() {
   const [currentParts, setCurrentParts] = useState<MessagePart[]>([]);
   const [activeThreadId, setActiveThreadId] = useState<Id<"threads"> | null>(null);
   const [activeArtifact, setActiveArtifact] = useState<Artifact | null>(null);
+  const [executionMode, setExecutionMode] = useState<'local' | 'sandbox'>('local');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const isStreamingRef = useRef(false);  // Track if we're streaming
@@ -579,7 +560,7 @@ function MainApp() {
       const chatResponse = await fetch('http://localhost:3001/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: userMessage, threadId }),
+        body: JSON.stringify({ message: userMessage, threadId, mode: executionMode }),
         credentials: 'include', // Send auth cookies
       });
 
@@ -625,7 +606,13 @@ function MainApp() {
       });
 
       eventSource.addEventListener('status', (event) => {
-        currentActivities.push({ type: 'step', name: event.data });
+        // Replace last status instead of accumulating
+        const lastIdx = currentActivities.findIndex(a => a.type === 'step');
+        if (lastIdx >= 0) {
+          currentActivities[lastIdx] = { type: 'step', name: event.data };
+        } else {
+          currentActivities.push({ type: 'step', name: event.data });
+        }
         updateActivityParts(parts, currentActivities, setCurrentParts);
       });
 
@@ -881,6 +868,24 @@ function MainApp() {
               {isLoading ? <Loader2 size={18} className="spin" /> : <Send size={18} />}
             </button>
           </form>
+          <div className="mode-selector">
+            <button
+              className={`mode-btn ${executionMode === 'local' ? 'active' : ''}`}
+              onClick={() => setExecutionMode('local')}
+              type="button"
+            >
+              <Monitor size={14} />
+              Local
+            </button>
+            <button
+              className={`mode-btn ${executionMode === 'sandbox' ? 'active' : ''}`}
+              onClick={() => setExecutionMode('sandbox')}
+              type="button"
+            >
+              <Cloud size={14} />
+              Sandbox
+            </button>
+          </div>
         </footer>
       </div>
     </div>
