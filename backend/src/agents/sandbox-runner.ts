@@ -2,7 +2,7 @@
  * Sandbox Runner — E2B Cloud Execution
  * 
  * Runs Claude Agent SDK inside E2B sandbox.
- * Uses explicit file paths for reliable file access.
+ * Matches local-runner's event streaming pattern.
  */
 
 import type { Sandbox } from '@e2b/code-interpreter';
@@ -21,31 +21,43 @@ export type StreamEvent = {
 
 /**
  * Run research in E2B sandbox
+ * Streams events similar to local-runner
  */
 export async function* runSandbox(task: string): AsyncGenerator<StreamEvent> {
-    yield { type: 'status', content: 'Starting research in sandbox...' };
+    console.log('\n[sandbox] ========== NEW SANDBOX SESSION ==========');
+    console.log(`[sandbox] Task: ${task.slice(0, 100)}...`);
+
+    yield { type: 'status', content: 'Starting sandbox...' };
+    console.log('[sandbox] Yielded: status -> Starting sandbox...');
 
     let sandbox: Sandbox | null = null;
+
+    // Collect events from stdout to yield after command completes
+    const pendingEvents: StreamEvent[] = [];
+
     try {
         const result = await getSandbox();
         sandbox = result.sandbox;
 
         // Setup if needed
         if (result.needsSetup) {
-            yield { type: 'status', content: 'Installing research tools (~30s)...' };
+            yield { type: 'status', content: 'Installing SDK (~30s)...' };
+            console.log('[sandbox] Yielded: status -> Installing SDK...');
             await setupSandbox(sandbox);
         }
 
         // Create files directory
         await sandbox.commands.run(`mkdir -p ${FILES_DIR}`);
+        console.log(`[sandbox] Created ${FILES_DIR}`);
 
         // Generate and write script
         const script = generateScript(task);
         await sandbox.files.write('/home/user/agent.mjs', script);
 
-        yield { type: 'status', content: 'Searching the web...' };
+        yield { type: 'status', content: 'Researching...' };
+        console.log('[sandbox] Yielded: status -> Researching...');
 
-        // Run agent
+        // Run agent and collect events
         await sandbox.commands.run('cd /home/user && node agent.mjs', {
             timeoutMs: 5 * 60 * 1000,
             onStdout: (line) => {
@@ -53,25 +65,55 @@ export async function* runSandbox(task: string): AsyncGenerator<StreamEvent> {
                     const msg = JSON.parse(line);
                     if (msg.type === 'assistant' && msg.message?.content) {
                         for (const block of msg.message.content) {
-                            if ('name' in block) {
-                                console.log(`[sandbox] Tool: ${block.name}`);
+                            if ('name' in block && 'input' in block) {
+                                const toolName = block.name as string;
+                                console.log(`[sandbox] Tool: ${toolName}`);
+
+                                // Only queue tool event (not status - would be out of order)
+                                pendingEvents.push({
+                                    type: 'tool',
+                                    content: toolName,
+                                    data: { name: toolName, input: block.input }
+                                });
                             }
                         }
                     }
                 } catch {
-                    if (line.trim()) console.log('[sandbox]', line);
+                    if (line.trim()) console.log('[sandbox stdout]', line);
                 }
             },
             onStderr: (line) => {
-                if (line.trim()) console.error('[sandbox error]', line);
+                if (line.trim()) console.error('[sandbox stderr]', line);
             }
         });
 
-        // Read report from explicit path
+        // Yield pending events
+        for (const event of pendingEvents) {
+            yield event;
+            console.log(`[sandbox] Yielded: ${event.type} -> ${event.content.slice(0, 50)}...`);
+        }
+
+        // Read report
+        console.log(`[sandbox] Reading report from ${REPORT_PATH}...`);
+        let report = '';
         try {
-            console.log(`[sandbox] Reading report from ${REPORT_PATH}...`);
-            const report = await sandbox.files.read(REPORT_PATH);
+            report = await sandbox.files.read(REPORT_PATH);
             console.log(`[sandbox] Report read (${report.length} chars)`);
+        } catch {
+            // Fallback: find report anywhere
+            console.log('[sandbox] Trying to find report.md...');
+            const findResult = await sandbox.commands.run('find /home/user -name "report.md" 2>/dev/null | head -1');
+            const path = findResult.stdout.trim();
+            if (path) {
+                console.log(`[sandbox] Found at: ${path}`);
+                report = await sandbox.files.read(path);
+            }
+        }
+
+        if (report) {
+            yield { type: 'status', content: 'Complete' };
+            console.log('[sandbox] Yielded: status -> Complete');
+
             yield {
                 type: 'artifact',
                 content: JSON.stringify({
@@ -80,20 +122,13 @@ export async function* runSandbox(task: string): AsyncGenerator<StreamEvent> {
                     content: report,
                 })
             };
-            yield { type: 'text', content: report };
-        } catch (err) {
-            // Fallback: find report anywhere
-            console.log('[sandbox] Trying to find report.md...');
-            const findResult = await sandbox.commands.run('find /home/user -name "report.md" 2>/dev/null | head -1');
-            const path = findResult.stdout.trim();
-            if (path) {
-                console.log(`[sandbox] Found at: ${path}`);
-                const report = await sandbox.files.read(path);
-                yield { type: 'text', content: report };
-            } else {
-                console.error('[sandbox] No report found');
-                yield { type: 'error', content: 'No report generated' };
-            }
+            console.log('[sandbox] Yielded: artifact');
+
+            // Only emit text if no artifact panel (optional)
+            // yield { type: 'text', content: report };  // Disabled to avoid duplication
+        } else {
+            console.error('[sandbox] No report found');
+            yield { type: 'status', content: 'No report generated' };
         }
 
     } finally {
@@ -103,21 +138,24 @@ export async function* runSandbox(task: string): AsyncGenerator<StreamEvent> {
     }
 
     yield { type: 'done', content: 'complete' };
+    console.log('[sandbox] ========== SESSION COMPLETE ==========\n');
 }
 
 /**
  * Generate agent script with explicit file path
  */
 function generateScript(task: string): string {
+    const promptWithPath = RESEARCHER_PROMPT.replace(/report\.md/g, REPORT_PATH);
+
     return `
 import { query } from '@anthropic-ai/claude-agent-sdk';
 
 for await (const msg of query({
     prompt: ${JSON.stringify(task)},
     options: {
-        systemPrompt: ${JSON.stringify(RESEARCHER_PROMPT.replace('report.md', REPORT_PATH))},
-        allowedTools: ['WebSearch', 'Write'],
-        maxTurns: 5,
+        systemPrompt: ${JSON.stringify(promptWithPath)},
+        allowedTools: ['WebSearch', 'Write', 'WebFetch'],
+        maxTurns: 10,
         cwd: '${FILES_DIR}',
         permissionMode: 'acceptEdits',
     }
