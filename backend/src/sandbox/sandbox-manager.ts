@@ -8,7 +8,7 @@
 /// <reference types="node" />
 import { Sandbox } from '@e2b/code-interpreter';
 
-const TEMPLATE_ALIAS = 'agent-sandbox';
+const TEMPLATE_ALIAS = 'claude-research-agent-v1';
 const E2B_WORKSPACE = '/home/user/workspace';
 const sandboxStore = new Map<string, string>(); // sessionId -> sandboxId
 

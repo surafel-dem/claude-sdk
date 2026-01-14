@@ -301,7 +301,9 @@ function StatusIndicator({ activities, isStreaming }: { activities: Activity[]; 
 function ArtifactCard({ artifact, onClick }: { artifact: Artifact; onClick: () => void }) {
   // Show helpful subtext based on artifact type
   const getSubtext = () => {
-    if (artifact.type === 'plan') return artifact.editable ? 'Waiting for approval' : 'Plan';
+    if (artifact.type === 'plan') {
+      return artifact.editable ? 'Waiting for approval' : '✓ Approved';
+    }
     if (artifact.type === 'report') return 'Research Report';
     return artifact.type;
   };
@@ -691,6 +693,16 @@ function MainApp() {
     setActiveArtifact(null);
     setIsLoading(true);
     isStreamingRef.current = true;
+
+    // Update the artifact in messages to show as approved
+    setMessages(prev => prev.map(msg => ({
+      ...msg,
+      parts: msg.parts.map(part =>
+        part.type === 'artifact' && part.artifact?.type === 'plan'
+          ? { ...part, artifact: { ...part.artifact!, editable: false } }
+          : part
+      )
+    })));
 
     // Add user approval message to UI
     setMessages(prev => [...prev, {

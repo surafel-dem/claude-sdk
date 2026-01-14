@@ -3,11 +3,14 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "tsx src/index.ts",
+    "dev": "tsx src/server.ts",
     "chat": "tsx src/chat.ts",
     "server": "tsx src/server.ts",
     "build": "tsc",
     "build:template": "tsx src/scripts/build-template.ts",
+    "template:check": "tsx src/scripts/build-template.ts --check",
+    "template:ensure": "tsx src/scripts/build-template.ts --ensure",
+    "setup": "npm run build:template",
     "start": "node dist/server.js"
   },
   "dependencies": {

@@ -61,15 +61,23 @@ cd ../frontend && npm install
 # backend/.env
 ANTHROPIC_API_KEY=sk-ant-...
 ANTHROPIC_MODEL=claude-sonnet-4-20250514
-SANDBOX_MODE=hybrid   # Options: local, e2b, hybrid
-E2B_API_KEY=e2b_...   # Required for e2b/hybrid modes
+E2B_API_KEY=e2b_...   # Required for sandbox mode
 ```
 
-### 3. Run
+### 3. Build E2B Template (First Time Only)
+
+```bash
+cd backend
+npm run setup   # Builds template with pre-installed SDK (2-5 mins)
+```
+
+This creates a custom E2B template for instant sandbox creation.
+
+### 4. Run
 
 ```bash
 # Terminal 1: Backend
-cd backend && npm run server
+cd backend && npm run dev
 
 # Terminal 2: Frontend
 cd frontend && npm run dev
