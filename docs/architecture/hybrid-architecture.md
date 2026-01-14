@@ -1,128 +1,154 @@
-# Hybrid Architecture (v2)
+# Hybrid Architecture
 
 ## Overview
 
-Inspired by [Manus AI](https://manus.im), our hybrid architecture separates fast orchestration from sandboxed execution. **Hybrid v2** introduces direct streaming of research reports, enhanced persistence via Convex, and real-time tool tracking.
+Research Agent wrapper using Claude Agent SDK. Two-phase execution with human-in-the-loop approval.
 
-## Core Pattern
+## System Diagram
 
-1. **Phase 1: Orchestrator (Direct LLM)**
-   - Operates outside the sandbox for maximum speed and instant response.
-   - Analyzes user intent, creates a research plan, and determines if sandboxed execution is required.
-   - Emits a **Plan Artifact** inline for user review/approval.
-
-2. **Phase 2: Researcher (E2B Sandbox)**
-   - Spins up an E2B microVM sandbox only when complex tasks (search, code, analysis) are needed.
-   - Uses the **Claude Agent SDK** within the sandbox for autonomous tool use.
-   - Emits real-time status and tool usage events to the UI.
-   - Streams the final research findings directly into the chat history.
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                      FRONTEND (Vite + React)                        │
+│   App.tsx: Messages, SSE Streaming, Artifact Panel                  │
+└─────────────────────────────────────────────────────────────────────┘
+                                    │
+                         SSE (Server-Sent Events)
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                      BACKEND (Hono :3001)                           │
+│  server.ts                                                          │
+│  ├── POST /api/chat → initRun (returns runId)                       │
+│  ├── GET /api/stream/:runId → runPlanning (Phase 1)                 │
+│  └── POST /api/continue/:runId → runResearch (Phase 2)              │
+└─────────────────────────────────────────────────────────────────────┘
+                                    │
+                   ┌────────────────┴────────────────┐
+                   │                                 │
+                   ▼                                 ▼
+        ┌──────────────────┐             ┌──────────────────┐
+        │   orchestrator   │             │     Convex       │
+        │   (state mgmt)   │             │   (persistence)  │
+        └────────┬─────────┘             └──────────────────┘
+                 │
+                 ▼ Phase 2: routes based on mode
+        ┌────────┴────────┐
+        │                 │
+        ▼                 ▼
+┌───────────────┐  ┌───────────────┐
+│ local-runner  │  │ sandbox-runner│
+│ (SDK direct)  │  │ (E2B cloud)   │
+└───────────────┘  └───────────────┘
+```
 
 ---
 
-## Technical Architecture
+## Two-Phase Flow
+
+### Phase 1: Planning (orchestrator.ts)
+
+1. User submits research request
+2. Orchestrator uses SDK to generate research plan
+3. Plan emitted as artifact for user review
+4. User approves/edits plan
+
+### Phase 2: Research (local-runner.ts or sandbox-runner.ts)
+
+1. User approves plan
+2. Backend routes to runner based on `mode`:
+   - `local`: SDK runs directly on backend
+   - `sandbox`: SDK runs in E2B microVM
+3. Runner executes research with tools (WebSearch, WebFetch, Write)
+4. Report emitted as artifact
+
+---
+
+## Sequence Diagram
 
 ```mermaid
 sequenceDiagram
     participant U as User
-    participant F as Frontend (Vite)
-    participant B as Backend (Hono)
-    participant C as Convex (DB)
-    participant S as E2B Sandbox (Researcher)
+    participant F as Frontend
+    participant B as server.ts
+    participant O as orchestrator.ts
+    participant R as Runner
+    participant C as Convex
 
-    U->>F: "Research AI trends"
+    U->>F: "Research AI agents"
     F->>B: POST /api/chat
-    B->>C: Store Message
-    B->>F: runId: "123"
+    B->>O: initRun(runId, msg, mode)
+    B->>F: { runId }
 
-    F->>B: GET /api/stream/123 (SSE)
-    B->>B: Phase 1: Orchestrator (Direct)
-    B-->>F: SSE: plan_artifact
-    B-->>F: SSE: text (Plan content)
+    F->>B: GET /api/stream/{runId} (SSE)
+    B->>O: runPlanning(runId)
+    O->>O: SDK query() with includePartialMessages
+    O-->>B: yield { type: 'text', content }
+    B-->>F: SSE: text
+    O-->>B: yield { type: 'artifact', content }
+    B->>C: createArtifact(plan)
+    B-->>F: SSE: artifact
+    O-->>B: yield { type: 'done' }
+    B-->>F: SSE: done
 
     U->>F: Approve Plan
-    F->>B: POST /api/approve
-
-    B->>B: Phase 2: Researcher (Sandbox)
-    B->>S: Create/Resume Sandbox
-    B->>S: Run Agent Script
-    S-->>B: stdout: tool_call (JSON)
-    B-->>F: SSE: status/tool events
+    F->>B: POST /api/continue/{runId}
+    B->>O: approveRun() → runResearch()
     
-    S->>S: Writes report.md
-    S-->>B: Agent Finished
-    B->>S: Read report.md
-    B-->>F: SSE: text (Report content)
-    B->>C: Persist Final Message
+    alt mode === 'local'
+        O->>R: runLocal(task)
+    else mode === 'sandbox'
+        O->>R: runSandbox(task)
+    end
+    
+    R->>R: SDK query() with tools
+    R-->>B: yield { type: 'status/tool/text/artifact' }
+    B-->>F: SSE events
+    B->>C: createArtifact(report)
+    B-->>F: SSE: done
 ```
 
 ---
 
-## Key Features in v2
+## Backend Files
 
-### 1. Direct Streaming Reports
-
-Unlike the original architecture which treated the report as a side-panel artifact, **v2 streams the report directly as standard markdown text**.
-
-- **Persistence**: Reports are automatically saved in the chat history.
-- **Readability**: Content flows naturally within the conversation.
-- **Divider-less Flow**: Smooth transition from "Thinking" status to final result.
-
-### 2. Real-time Tool Tracking
-
-The backend uses an **Event Queue** to parse sandbox `stdout` and yield events immediately to the UI.
-
-- **Frontend**: The `StatusIndicator` component displays tool calls (e.g., `WebSearch`, `Write`) in real-time.
-- **Shimmering Status**: Uses a Cursor-style shimmering text effect for active research.
-
-### 3. Sandbox Hooks & Tool Interception
-
-We use **PostToolUse** hooks in the agent script to capture file writes and tool usage.
-
-```javascript
-hooks: {
-    PostToolUse: [{
-        hooks: [async (input) => {
-            console.log(JSON.stringify({ 
-                type: 'tool_call', 
-                name: input.tool_name,
-                input: input.tool_input
-            }));
-            return {};
-        }]
-    }]
-}
-```
-
-### 4. Session Persistence & Resumption
-
-Sandboxes are preserved using `sandbox.betaPause()` and associated with a `sessionId` in the `sandboxStore`.
-
-- **Resume**: If a session exists, the backend uses `Sandbox.connect()` to restore the environment.
-- **Context**: The agent script uses `AGENT_SESSION_ID` to continue previous Claude Agent SDK conversations.
+| File | Location | Purpose |
+|------|----------|---------|
+| `server.ts` | `backend/src/` | Hono routes, SSE streaming |
+| `orchestrator.ts` | `backend/src/agents/` | State management, phase routing |
+| `local-runner.ts` | `backend/src/agents/` | SDK execution on backend |
+| `sandbox-runner.ts` | `backend/src/agents/` | SDK execution in E2B |
+| `convex.ts` | `backend/src/lib/` | Convex HTTP client |
 
 ---
 
-## Data Flow Summary
+## SSE Event Types
 
-| Phase | Component | Location | Artifacts | Output Type |
-|-------|-----------|----------|-----------|-------------|
-| **1: Planning** | Orchestrator | Backend (Direct) | `plan.md` | `artifact`, `text` |
-| **2: Research** | Researcher | E2B Sandbox | `report.md` | `status`, `tool`, `text` (streaming) |
-
----
-
-## Persistence Layer (Convex)
-
-Convex acts as the source of truth for:
-
-- **Messages**: Includes both user prompts and assistant streaming responses.
-- **Artifacts**: Stores Research Plans for cross-session access.
-- **Snapshots**: Capture of the sandbox state when required.
+| Event | Data | Description |
+|-------|------|-------------|
+| `text` | string | Text content to display |
+| `artifact` | JSON | Plan or report artifact |
+| `status` | string | Activity indicator |
+| `tool` | JSON | Tool call info |
+| `done` | - | Stream complete |
+| `error` | string | Error message |
 
 ---
 
-## File Mapping
+## Execution Modes
 
-- `backend/src/sandbox/hybrid-v2.ts`: Main orchestration logic and event queue.
-- `frontend/src/App.tsx`: `StatusIndicator` and streaming message rendering.
-- `backend/src/prompts/`: System instructions for Orchestrator and Researcher.
+| Mode | Phase 1 | Phase 2 | Use Case |
+|------|---------|---------|----------|
+| `local` | orchestrator | local-runner | Development, simple tasks |
+| `sandbox` | orchestrator | sandbox-runner | Production, complex execution |
+
+---
+
+## Convex Integration
+
+Convex serves as the persistence layer:
+
+- **threads**: Chat sessions per user
+- **messages**: Chat history (user + assistant)
+- **artifacts**: Plans and reports linked to threads
+
+Artifacts are created on the backend when SSE events are emitted, ensuring persistence even if frontend disconnects.

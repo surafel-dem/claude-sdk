@@ -9,6 +9,7 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'fs';
 import { RESEARCHER_PROMPT } from '../prompts/researcher.js';
+import { exaSearchTools } from '../tools/exa-search.js';
 
 const WORKSPACE = './workspace';
 
@@ -45,17 +46,41 @@ export async function* runLocal(task: string, sessionId?: string): AsyncGenerato
     );
 
     try {
+        console.log('[local] ===== STARTING SDK QUERY =====');
+
+        // MCP servers require streaming input mode (async generator)
+        async function* generatePrompt() {
+            yield {
+                type: 'user' as const,
+                message: {
+                    role: 'user' as const,
+                    content: task
+                }
+            };
+        }
+
         for await (const msg of query({
-            prompt: task,
+            prompt: generatePrompt() as any,  // Use async generator for MCP support
             options: {
                 systemPrompt: sessionPrompt,
-                allowedTools: ['WebSearch', 'Write', 'WebFetch', 'Read', 'Task'],
+                mcpServers: {
+                    "exa-search": exaSearchTools
+                },
+                allowedTools: [
+                    'mcp__exa-search__search',
+                    'mcp__exa-search__get_contents',
+                    'Write',
+                    'Read'
+                ],
                 maxTurns: 15,
                 cwd: sessionDir,
                 permissionMode: 'acceptEdits',
                 includePartialMessages: true,  // Enable real-time streaming
             }
         })) {
+            // Log all message types for debugging
+            console.log(`[local] SDK msg.type: ${msg.type}`);
+
             // Handle real-time token streaming
             if (msg.type === 'stream_event') {
                 const event = (msg as any).event;
@@ -140,9 +165,7 @@ export async function* runLocal(task: string, sessionId?: string): AsyncGenerato
         };
         console.log('[local] Yielded: artifact');
 
-        // Stream the report content
-        yield { type: 'text', content: '\n\n---\n\n' + reportContent };
-        console.log('[local] Yielded: text (report content)');
+        // Report is in artifact - no need to emit as text again
     } else {
         // Try to read from file if agent wrote directly
         if (existsSync(reportPath)) {
@@ -156,7 +179,7 @@ export async function* runLocal(task: string, sessionId?: string): AsyncGenerato
                     content: fileContent,
                 })
             };
-            yield { type: 'text', content: '\n\n---\n\n' + fileContent };
+            // Report is in artifact - no need to emit as text again
         } else {
             console.log('[local] No report generated');
             yield { type: 'status', content: 'No report generated' };

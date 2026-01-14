@@ -156,23 +156,78 @@ export async function* runSandbox(task: string): AsyncGenerator<StreamEvent> {
 }
 
 /**
- * Generate agent script with explicit file path
+ * Generate agent script with Exa search tool
+ * Creates an inline MCP server for Exa search
  */
 function generateScript(task: string): string {
     const promptWithPath = RESEARCHER_PROMPT.replace(/report\.md/g, REPORT_PATH);
+    const exaApiKey = process.env.EXA_API_KEY || '';
 
     return `
-import { query } from '@anthropic-ai/claude-agent-sdk';
+import { query, createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
+import { z } from 'zod';
+import Exa from 'exa-js';
 
+// Initialize Exa client
+const exaApiKey = ${JSON.stringify(exaApiKey)};
+const getExaClient = () => {
+    if (!exaApiKey) throw new Error("EXA_API_KEY not set");
+    return new Exa(exaApiKey);
+};
+
+// Create Exa search MCP server
+const exaSearchTools = createSdkMcpServer({
+    name: "exa-search",
+    version: "1.0.0",
+    tools: [
+        tool(
+            "search",
+            "Search the web using Exa neural search",
+            {
+                query: z.string().describe("Search query"),
+                num_results: z.number().min(1).max(10).default(5)
+            },
+            async (args) => {
+                try {
+                    const exa = getExaClient();
+                    const results = await exa.searchAndContents(args.query, {
+                        type: "neural",
+                        numResults: args.num_results,
+                        useAutoprompt: true,
+                        contents: { text: { maxCharacters: 1000 } }
+                    });
+                    return {
+                        content: [{
+                            type: "text",
+                            text: JSON.stringify({
+                                total: results.results.length,
+                                results: results.results.map(r => ({
+                                    title: r.title,
+                                    url: r.url,
+                                    text: r.text?.slice(0, 500)
+                                }))
+                            }, null, 2)
+                        }]
+                    };
+                } catch (error) {
+                    return { content: [{ type: "text", text: "Search error: " + error.message }], isError: true };
+                }
+            }
+        )
+    ]
+});
+
+// Run agent
 for await (const msg of query({
     prompt: ${JSON.stringify(task)},
     options: {
         systemPrompt: ${JSON.stringify(promptWithPath)},
-        allowedTools: ['WebSearch', 'Write', 'WebFetch'],
+        mcpServers: { "exa-search": exaSearchTools },
+        allowedTools: ['mcp__exa-search__search', 'Write', 'Read'],
         maxTurns: 10,
         cwd: '${FILES_DIR}',
         permissionMode: 'acceptEdits',
-        includePartialMessages: true,  // Enable real-time streaming
+        includePartialMessages: true,
     }
 })) {
     console.log(JSON.stringify(msg));

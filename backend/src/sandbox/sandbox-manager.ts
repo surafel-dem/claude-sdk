@@ -8,7 +8,7 @@
 /// <reference types="node" />
 import { Sandbox } from '@e2b/code-interpreter';
 
-const TEMPLATE_ALIAS = 'claude-research-agent-v1';
+const TEMPLATE_ALIAS = 'claude-research-agent-v2';
 const E2B_WORKSPACE = '/home/user/workspace';
 const sandboxStore = new Map<string, string>(); // sessionId -> sandboxId
 
@@ -94,9 +94,9 @@ export async function setupSandbox(sandbox: Sandbox): Promise<void> {
     await sandbox.commands.run(`mkdir -p ${E2B_WORKSPACE}`);
 
     // CRITICAL: Local npm install for ESM module resolution
-    log('INFO', 'Installing SDK locally in /home/user (this may take ~30s)...');
+    log('INFO', 'Installing SDK and Exa locally in /home/user (this may take ~30s)...');
     const result = await sandbox.commands.run(
-        'cd /home/user && npm init -y && npm install @anthropic-ai/claude-agent-sdk',
+        'cd /home/user && npm init -y && npm install @anthropic-ai/claude-agent-sdk exa-js zod',
         { timeoutMs: 120000 }
     );
 

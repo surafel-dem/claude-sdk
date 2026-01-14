@@ -4,7 +4,6 @@
   "type": "module",
   "scripts": {
     "dev": "tsx src/server.ts",
-    "chat": "tsx src/chat.ts",
     "server": "tsx src/server.ts",
     "build": "tsc",
     "build:template": "tsx src/scripts/build-template.ts",
@@ -20,7 +19,9 @@
     "@hono/node-server": "^1.13.0",
     "dotenv": "^16.4.7",
     "e2b": "^2.9.0",
-    "hono": "^4.6.0"
+    "exa-js": "^2.0.12",
+    "hono": "^4.6.0",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/node": "^22.19.3",

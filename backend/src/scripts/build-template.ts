@@ -15,7 +15,7 @@ import 'dotenv/config';
 import { Template, Sandbox } from 'e2b';
 
 // Must match sandbox-manager.ts
-export const TEMPLATE_ALIAS = 'claude-research-agent-v1';
+export const TEMPLATE_ALIAS = 'claude-research-agent-v2';
 
 /**
  * Check if template exists
@@ -48,7 +48,7 @@ export async function buildTemplate(): Promise<void> {
         .makeDir('/home/user/workspace')
         .makeDir('/home/user/files')
         .runCmd('cd /home/user && npm init -y')
-        .runCmd('cd /home/user && npm install @anthropic-ai/claude-agent-sdk');
+        .runCmd('cd /home/user && npm install @anthropic-ai/claude-agent-sdk exa-js zod');
 
     console.log('   Building... (2-5 minutes)\n');
 
