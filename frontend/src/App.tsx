@@ -4,7 +4,7 @@ import { api } from '@convex/_generated/api';
 import type { Id } from '@convex/_generated/dataModel';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Send, Loader2, FileText, X, Check, Edit3, Sparkles, Plus, MessageSquare, Trash2, LogOut, ChevronRight } from 'lucide-react';
+import { Send, Loader2, FileText, X, Check, Edit3, Sparkles, Plus, MessageSquare, Trash2, LogOut, ChevronRight, AlertCircle } from 'lucide-react';
 import { useSession, signIn, signUp, signOut } from './lib/auth-client';
 import './App.css';
 
@@ -17,12 +17,45 @@ interface Activity {
 }
 
 interface Artifact {
-  id: string;
-  type: 'plan';
-  title: string;
+  id?: string;
+  type: 'plan' | 'report';
+  title?: string;
   content: string;
   editable?: boolean;
   preview?: string;
+}
+
+// Helper to parse server artifact data
+function parseArtifact(data: { type: string; content: string }): Artifact {
+  // Basic validation
+  if (!data || typeof data.content !== 'string') {
+    throw new Error('Invalid artifact data');
+  }
+
+  const content = data.content.trim();
+  if (content.length < 5) {
+    throw new Error('Content too short');
+  }
+
+  // For plans, check for the expected format
+  if (data.type === 'plan') {
+    const titleMatch = content.match(/## Research:\s*([^\n]+)/);
+    return {
+      id: crypto.randomUUID(),
+      type: 'plan',
+      title: titleMatch ? titleMatch[1].trim() : 'Research Plan',
+      content,
+      editable: true,
+    };
+  }
+
+  return {
+    id: crypto.randomUUID(),
+    type: data.type as 'plan' | 'report',
+    title: data.type === 'report' ? 'Research Report' : 'Document',
+    content,
+    editable: false,
+  };
 }
 
 interface MessagePart {
@@ -324,7 +357,9 @@ function ArtifactPanel({ artifact, onClose, onSave, onApprove }: {
         <div className="panel-title">
           <FileText size={14} />
           <span>{artifact.title}</span>
-          <span className="panel-badge">{artifact.type}</span>
+          {artifact.type === 'plan' && (
+            <span className="panel-badge pending">Plan</span>
+          )}
         </div>
         <div className="panel-actions">
           {artifact.editable && !isEditing && (
@@ -333,9 +368,14 @@ function ArtifactPanel({ artifact, onClose, onSave, onApprove }: {
             </button>
           )}
           {isEditing && (
-            <button className="panel-btn primary" onClick={handleSave}>
-              <Check size={12} /> Save
-            </button>
+            <>
+              <button className="panel-btn primary" onClick={handleSave}>
+                <Check size={12} /> Save
+              </button>
+              <button className="panel-btn" onClick={() => { setEditContent(artifact.content); setIsEditing(false); }}>
+                Cancel
+              </button>
+            </>
           )}
           <button className="panel-close" onClick={onClose}><X size={14} /></button>
         </div>
@@ -350,7 +390,7 @@ function ArtifactPanel({ artifact, onClose, onSave, onApprove }: {
         )}
       </div>
       {artifact.type === 'plan' && artifact.editable && onApprove && (
-        <div className="panel-footer">
+        <div className="panel-footer approval-actions">
           <button className="approve-btn" onClick={onApprove}>
             <Sparkles size={14} /> Approve & Start Research
           </button>
@@ -366,14 +406,12 @@ function cleanInternalMarkers(text: string): string {
     // Remove internal execution markers
     .replace(/\[EXECUTE_RESEARCH\]/g, '')
     .replace(/RESEARCH_TASK:[^\n]*/g, '')
-    .replace(/```[\s\S]*?\[EXECUTE_RESEARCH\][\s\S]*?```/g, '')
     // Remove approval messages
     .replace(/✅ Approved. Starting research.../g, '')
     .replace(/^APPROVED:.*$/gm, '')
-    .replace(/^\d+$/gm, '') // Remove stray turn counts/numbers
-    // Clean strings like "Plan:" or "Ready to research"
-    .replace(/^Plan:$/gm, '')
-    .replace(/Ready to research.*$/gm, '')
+    // Remove stray markers
+    .replace(/^\d+$/gm, '')
+    .replace(/^complete$/gm, '')
     // Clean up empty containers
     .replace(/```\s*```/g, '')
     .replace(/\n{3,}/g, '\n\n')
@@ -440,6 +478,7 @@ function MainApp() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const isStreamingRef = useRef(false);  // Track if we're streaming
+  const currentRunIdRef = useRef<string | null>(null);  // Track current run for continuation
 
   // Store artifacts separately so Convex sync doesn't kill them
   const artifactsRef = useRef<Map<number, Artifact>>(new Map());
@@ -546,6 +585,7 @@ function MainApp() {
 
       const data = await chatResponse.json();
       isStreamingRef.current = true;  // Mark streaming started
+      currentRunIdRef.current = data.runId;  // Store runId for continuation
       const eventSource = new EventSource(`http://localhost:3001/api/stream/${data.runId}`);
       let parts: MessagePart[] = [];
       let currentActivities: Activity[] = [];
@@ -591,7 +631,7 @@ function MainApp() {
 
       eventSource.addEventListener('artifact', (event) => {
         try {
-          const artifactData = JSON.parse(event.data) as Artifact;
+          const artifactData = parseArtifact(JSON.parse(event.data));
           if (currentActivities.length > 0) {
             parts = [...parts, { type: 'activity', content: '', activities: [...currentActivities] }];
             currentActivities = [];
@@ -599,7 +639,7 @@ function MainApp() {
           parts = [...parts, { type: 'artifact', content: '', artifact: artifactData }];
           setCurrentParts([...parts]);
 
-          // Auto-open artifact panel (like Claude Code)
+          // Auto-open artifact panel for plans and reports
           setActiveArtifact(artifactData);
 
           // Save artifact to ref so Convex sync doesn't lose it
@@ -658,11 +698,9 @@ function MainApp() {
   };
 
   const handleApprove = async () => {
-    if (!activeArtifact || !activeThreadId) return;
+    if (!activeArtifact || !currentRunIdRef.current) return;
 
-    // Send approval message with plan content so orchestrator has context
-    const approvalMessage = `APPROVED: Please execute the research plan.\n\nPlan:\n${activeArtifact.content}`;
-
+    const planContent = activeArtifact.content;
     setActiveArtifact(null);
     setIsLoading(true);
     isStreamingRef.current = true;
@@ -674,87 +712,97 @@ function MainApp() {
     }]);
 
     try {
-      // Create thread if needed
-      let threadId = activeThreadId;
-      if (!threadId) {
-        threadId = await createThread({ title: 'Research' }) as Id<"threads">;
-        setActiveThreadId(threadId);
-      }
-
-      // Save approval message to Convex
-      await sendMessage({ threadId, role: 'user', content: approvalMessage });
-
-      // Send to backend
-      const res = await fetch('http://localhost:3001/api/chat', {
+      // POST to /api/continue - response IS the SSE stream
+      const res = await fetch(`http://localhost:3001/api/continue/${currentRunIdRef.current}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ message: approvalMessage, threadId })
+        body: JSON.stringify({ action: 'approve', plan: planContent })
       });
 
-      const { runId } = await res.json();
+      if (!res.ok || !res.body) {
+        throw new Error('Failed to start research');
+      }
 
-      // Setup SSE stream for research results
+      // Read SSE from POST response body
       let parts: MessagePart[] = [];
       let currentActivities: Activity[] = [];
       let fullResponse = '';
 
-      const eventSource = new EventSource(`http://localhost:3001/api/stream/${runId}`);
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
 
-      eventSource.addEventListener('text', (event) => {
-        fullResponse += event.data;
-        parts = [...parts, { type: 'text', content: event.data }];
-        setCurrentParts([...parts]);
-      });
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-      eventSource.addEventListener('status', (event) => {
-        currentActivities.push({ type: 'step', name: event.data });
-        parts = [...parts, { type: 'activity', content: '', activities: [...currentActivities] }];
-        currentActivities = [];
-        setCurrentParts([...parts]);
-      });
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
 
-      eventSource.addEventListener('tool', (event) => {
-        try {
-          const toolData = JSON.parse(event.data);
-          currentActivities.push({ type: 'tool', name: toolData.name, detail: toolData.input?.query });
-          parts = [...parts, { type: 'activity', content: '', activities: [...currentActivities] }];
-          currentActivities = [];
-          setCurrentParts([...parts]);
-        } catch { /* ignore */ }
-      });
+        for (const line of lines) {
+          if (line.startsWith('event:')) {
+            const eventType = line.slice(6).trim();
+            const dataLine = lines[lines.indexOf(line) + 1];
+            const data = dataLine?.startsWith('data:') ? dataLine.slice(5).trim() : '';
 
-      eventSource.addEventListener('artifact', (event) => {
-        try {
-          const artifactData = JSON.parse(event.data) as Artifact;
-          parts = [...parts, { type: 'artifact', content: '', artifact: artifactData }];
-          setCurrentParts([...parts]);
-          setActiveArtifact(artifactData);
+            switch (eventType) {
+              case 'text':
+                fullResponse += data;
+                parts = [...parts, { type: 'text', content: data }];
+                setCurrentParts([...parts]);
+                break;
 
-          // Save artifact to ref
-          artifactsRef.current.set(messages.length + 1, artifactData);
-        } catch { /* ignore */ }
-      });
+              case 'status':
+              case 'phase':
+                currentActivities.push({ type: 'step', name: data });
+                parts = [...parts, { type: 'activity', content: '', activities: [...currentActivities] }];
+                currentActivities = [];
+                setCurrentParts([...parts]);
+                break;
 
-      eventSource.addEventListener('done', async () => {
-        eventSource.close();
+              case 'tool':
+                try {
+                  const toolData = JSON.parse(data);
+                  currentActivities.push({ type: 'tool', name: toolData.name, detail: toolData.input?.query });
+                  parts = [...parts, { type: 'activity', content: '', activities: [...currentActivities] }];
+                  currentActivities = [];
+                  setCurrentParts([...parts]);
+                } catch { /* ignore */ }
+                break;
 
-        if (fullResponse && threadId) {
-          await sendMessage({ threadId, role: 'assistant', content: fullResponse });
+              case 'artifact':
+                try {
+                  const artifactData = parseArtifact(JSON.parse(data));
+                  parts = [...parts, { type: 'artifact', content: '', artifact: artifactData }];
+                  setCurrentParts([...parts]);
+                  setActiveArtifact(artifactData);
+                  artifactsRef.current.set(messages.length + 1, artifactData);
+                } catch { /* ignore */ }
+                break;
+
+              case 'done':
+                // Complete
+                break;
+
+              case 'error':
+                console.error('Research error:', data);
+                break;
+            }
+          }
         }
+      }
 
-        setMessages(prev => [...prev, { role: 'assistant', parts: [...parts] }]);
-        setCurrentParts([]);
-        setIsLoading(false);
-        isStreamingRef.current = false;
-      });
+      // Finalize
+      if (fullResponse && activeThreadId) {
+        await sendMessage({ threadId: activeThreadId, role: 'assistant', content: fullResponse });
+      }
 
-      eventSource.addEventListener('error', () => {
-        eventSource.close();
-        setCurrentParts([]);
-        setIsLoading(false);
-        isStreamingRef.current = false;
-      });
+      setMessages(prev => [...prev, { role: 'assistant', parts: [...parts] }]);
+      setCurrentParts([]);
+      setIsLoading(false);
+      isStreamingRef.current = false;
+
     } catch (error) {
       console.error('Approval error:', error);
       setIsLoading(false);

@@ -1,137 +1,115 @@
-# Sandbox Architecture
+# E2B Sandbox Architecture
 
-## Modes
+## Overview
 
-| Mode | Execution | Use Case |
-|------|-----------|----------|
-| **local** | Direct on machine | Development |
-| **e2b** | Cloud sandbox | Production |
-| **hybrid** | Orchestrator local + Researcher E2B | Optimal |
+E2B sandbox enables secure, isolated execution of AI agents in cloud microVMs.
 
-## Mode Selection
+## SDK Server Pattern (Recommended)
 
-```typescript
-// sandbox/index.ts
-export function getMode(): SandboxMode {
-  const mode = process.env.SANDBOX_MODE?.toLowerCase();
-  if (mode === 'e2b') return 'e2b';
-  if (mode === 'hybrid') return 'hybrid';
-  return 'local';
-}
+```mermaid
+sequenceDiagram
+    participant B as Backend
+    participant S as E2B Sandbox
+    participant A as Agent SDK
+
+    B->>S: Create sandbox from template
+    S-->>B: sandboxId + server starts on :3000
+    B->>S: getHost(3000) → wss://xxx.e2b.app
+    B->>S: WebSocket connect
+    B->>S: Send prompt via WS
+    S->>A: query({ prompt })
+    A-->>S: SDK messages (streaming)
+    S-->>B: Forward via WebSocket
+    B->>S: Disconnect
+    B->>S: betaPause(sandboxId)
 ```
 
-## Local Mode
+## E2B File System
 
-Direct execution using the SDK:
+Default sandbox structure:
 
-```typescript
-// sandbox/local.ts
-import { query } from '@anthropic-ai/claude-agent-sdk';
-
-export function runLocal(prompt: string) {
-  mkdirSync('./workspace', { recursive: true });
-  return query({
-    prompt,
-    options: {
-      systemPrompt: orchestratorConfig.systemPrompt,
-      allowedTools: orchestratorConfig.allowedTools,
-      cwd: './workspace',
-      agents: { researcher },
-    },
-  });
-}
+```
+/home/user/                    ← Default workdir (user: 'user')
+├── workspace/                 ← Agent output files
+│   ├── plan.md
+│   └── report.md
+├── server/                    ← Our WebSocket server
+│   ├── index.ts
+│   ├── package.json
+│   └── node_modules/
+└── .anthropic/                ← SDK creates this
 ```
 
-## E2B Mode
+## Key APIs
 
-Full sandbox execution in Firecracker microVM:
+| Method | Purpose |
+|--------|---------|
+| `Sandbox.create(template)` | Create from template |
+| `Sandbox.betaCreate(template, { autoPause: true })` | Create with auto-pause |
+| `Sandbox.connect(sandboxId)` | Resume paused sandbox |
+| `Sandbox.betaPause(sandboxId)` | Pause for later resume |
+| `sandbox.getHost(port)` | Get public URL for port |
+| `sandbox.commands.run(cmd)` | Run shell command |
+| `sandbox.files.write(path, content)` | Write file |
+| `sandbox.files.read(path)` | Read file |
+
+## Template Building
 
 ```typescript
-// sandbox/e2b.ts
-export async function* runInE2B(prompt: string) {
-  const sandbox = await Sandbox.create({
-    timeoutMs: 10 * 60 * 1000,
+import { Template } from 'e2b';
+
+const template = Template()
+    .fromNodeImage('24')
+    .setWorkdir('/home/user')
+    .runCmd('npm init -y')
+    .npmInstall(['@anthropic-ai/claude-agent-sdk', 'hono'])
+    .copy('./server', '/home/user/server')
+    .setStartCmd('cd /home/user/server && node index.js', { waitForPort: 3000 });
+
+await Template.build(template, { alias: 'agent-sandbox' });
+```
+
+## Port Exposure
+
+```typescript
+// Server running on port 3000 inside sandbox
+const host = sandbox.getHost(3000);
+// → "https://sandbox-xxx.e2b.app"
+
+// Connect via WebSocket
+const ws = new WebSocket(`wss://${host}`);
+```
+
+## Environment Variables
+
+```typescript
+const sandbox = await Sandbox.betaCreate('agent-sandbox', {
     envs: {
-      ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+        ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+        ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL,
     },
-  });
-
-  await sandbox.commands.run('mkdir -p /home/user/workspace');
-  await sandbox.commands.run('npm install @anthropic-ai/claude-agent-sdk');
-
-  const script = generateAgentScript(prompt);
-  await sandbox.files.write('/home/user/agent.mjs', script);
-  
-  await sandbox.commands.run('node /home/user/agent.mjs', {
-    onStdout: (line) => messages.push(JSON.parse(line)),
-  });
-
-  await sandbox.betaPause();
-  // ...
-}
-```
-
-## Pause/Resume
-
-E2B supports sandbox persistence:
-
-```typescript
-// Pause - preserves full state
-await sandbox.betaPause();
-
-// Resume
-const sandbox = await Sandbox.connect(sandboxId, {
-  timeoutMs: 10 * 60 * 1000,
 });
 ```
 
-## Comparison
-
-| Aspect | Local | E2B |
-|--------|-------|-----|
-| **Speed** | Fast | 3-5s startup |
-| **Isolation** | None | Full container |
-| **Debugging** | Easy | Harder |
-| **Cost** | Free | E2B fees |
-| **Persistence** | On disk | Pause/resume |
-| **Security** | Trust required | Isolated |
-
-## Workspace Paths
-
-| Mode | Path |
-|------|------|
-| Local | `./workspace` |
-| E2B | `/home/user/workspace` |
-
-## Environment Passthrough
+## Pause/Resume Pattern
 
 ```typescript
-const sandbox = await Sandbox.create({
-  envs: {
-    ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
-    ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL,
-    ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL,
-  },
-});
+// Create and use
+const sandbox = await Sandbox.betaCreate('agent-sandbox', { autoPause: true });
+const sandboxId = sandbox.sandboxId;
+
+// ... do work ...
+
+// Pause for reuse
+await Sandbox.betaPause(sandboxId);
+
+// Resume later
+const resumed = await Sandbox.connect(sandboxId);
 ```
 
-## When to Use Each
+## Security Considerations
 
-### Local
-
-- Development
-- Debugging
-- Trusted environment
-- Fast iteration
-
-### E2B
-
-- Production
-- Untrusted input
-- Full isolation needed
-
-### Hybrid
-
-- Best of both worlds
-- Fast planning (local)
-- Isolated execution (E2B)
+- **Isolation**: Full microVM isolation
+- **No local access**: Sandbox cannot touch host filesystem
+- **API keys**: Passed via `envs`, not embedded in template
+- **Network**: Public URLs secured via E2B authentication

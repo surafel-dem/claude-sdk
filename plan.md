@@ -17,7 +17,7 @@ Multi-Agent Research System
 
 | Agent             | Tools                                    | Purpose                                      |
 | ----------------- | ---------------------------------------- | -------------------------------------------- |
-| **Lead Agent**    | `Task`                                   | Coordinates research, delegates to subagents |
+| **Lead Agent**    | `Write`, `Task`                                   | Coordinates research, delegates to subagents |
 | **Researcher**    | `WebSearch`, `Write`                     | Gathers information from the web             |
 | **Report Writer** | `Skill`, `Write`, `Glob`, `Read`, `Bash` | Creates PDF reports with embedded visuals    |
 

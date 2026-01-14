@@ -1,8 +1,14 @@
 /**
  * Agents Module
- *
- * Simplified: just orchestrator + researcher
  */
 
-export { orchestratorConfig } from './orchestrator.js';
-export { researcher } from './researcher.js';
+export {
+    initRun,
+    getRunState,
+    approveRun,
+    runPlanning,
+    runResearch,
+    type StreamEvent
+} from './orchestrator.js';
+
+export { researcher, reportWriter } from './subagents.js';

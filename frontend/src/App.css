@@ -894,6 +894,11 @@ body {
   color: var(--text-muted);
 }
 
+.panel-badge.pending {
+  background: rgba(14, 165, 233, 0.15);
+  color: var(--accent);
+}
+
 .panel-actions {
   display: flex;
   align-items: center;
