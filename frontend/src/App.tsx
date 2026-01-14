@@ -4,7 +4,7 @@ import { api } from '@convex/_generated/api';
 import type { Id } from '@convex/_generated/dataModel';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Send, Loader2, FileText, X, Check, Edit3, Sparkles, Plus, MessageSquare, Trash2, LogOut, ChevronRight, AlertCircle, Monitor, Cloud } from 'lucide-react';
+import { Loader2, FileText, X, Check, Edit3, Sparkles, Plus, MessageSquare, Trash2, LogOut, ArrowUp, ChevronDown, Monitor, Cloud } from 'lucide-react';
 import { useSession, signIn, signUp, signOut } from './lib/auth-client';
 import './App.css';
 
@@ -818,87 +818,121 @@ function MainApp() {
       />
 
       <div className="main-content">
-        <header className="header">
-          <span className="logo">Research Agent</span>
-        </header>
+        {/* Landing state: centered greeting + input */}
+        {messages.length === 0 && !isLoading ? (
+          <div className="landing">
+            <div className="landing-content">
+              <h1 className="landing-title">What would you like to research?</h1>
+              <p className="landing-subtitle">I'll create a plan, gather information, and write a comprehensive report.</p>
 
-        <div className="main-container">
-          <main className="chat-area">
-            <div className="messages">
-              {messages.length === 0 && !isLoading && (
-                <div className="welcome">
-                  <div className="welcome-icon"><Sparkles size={32} /></div>
-                  <h1>Research Agent</h1>
-                  <p>Ask me to research any topic. I'll create a plan, gather information, and write a comprehensive report.</p>
+              <form onSubmit={handleSubmit} className="claude-input">
+                <textarea
+                  ref={textareaRef}
+                  value={input}
+                  onChange={handleTextareaChange}
+                  onKeyDown={handleKeyDown}
+                  placeholder="Ask anything..."
+                  disabled={isLoading}
+                  rows={1}
+                />
+                <div className="claude-input-toolbar">
+                  <div className="toolbar-left">
+                    <button type="button" className="icon-btn" title="Attach files">
+                      <Plus size={18} />
+                    </button>
+                    <div className="mode-dropdown">
+                      <button
+                        type="button"
+                        className="mode-dropdown-trigger"
+                        onClick={() => setExecutionMode(executionMode === 'local' ? 'sandbox' : 'local')}
+                      >
+                        {executionMode === 'local' ? <Monitor size={14} /> : <Cloud size={14} />}
+                        <span>{executionMode === 'local' ? 'Local' : 'Sandbox'}</span>
+                        <ChevronDown size={14} />
+                      </button>
+                    </div>
+                  </div>
+                  <button type="submit" disabled={isLoading || !input.trim()} className="send-btn-arrow">
+                    <ArrowUp size={18} strokeWidth={2.5} />
+                  </button>
                 </div>
-              )}
+              </form>
+            </div>
+          </div>
+        ) : (
+          /* Chat state: messages + bottom input */
+          <>
+            <div className="main-container">
+              <main className="chat-area">
+                <div className="messages">
+                  {messages.map((msg, i) => (
+                    <div key={i} className={`message ${msg.role}`}>
+                      <MessageContent parts={msg.parts} onArtifactClick={setActiveArtifact} />
+                    </div>
+                  ))}
 
-              {messages.map((msg, i) => (
-                <div key={i} className={`message ${msg.role}`}>
-                  <MessageContent parts={msg.parts} onArtifactClick={setActiveArtifact} />
-                </div>
-              ))}
-
-              {(currentParts.length > 0 || isLoading) && (
-                <div className="message assistant">
-                  {currentParts.length > 0 ? (
-                    <MessageContent parts={currentParts} isStreaming onArtifactClick={setActiveArtifact} />
-                  ) : (
-                    <div className="thinking">
-                      <div className="thinking-dots"><span /><span /><span /></div>
+                  {(currentParts.length > 0 || isLoading) && (
+                    <div className="message assistant">
+                      {currentParts.length > 0 ? (
+                        <MessageContent parts={currentParts} isStreaming onArtifactClick={setActiveArtifact} />
+                      ) : (
+                        <div className="status-indicator">
+                          <span className="status-shimmer">Creating research plan...</span>
+                        </div>
+                      )}
                     </div>
                   )}
+
+                  <div ref={messagesEndRef} />
                 </div>
+              </main>
+
+              {activeArtifact && (
+                <ArtifactPanel
+                  artifact={activeArtifact}
+                  onClose={() => setActiveArtifact(null)}
+                  onSave={handleArtifactSave}
+                  onApprove={activeArtifact.type === 'plan' && activeArtifact.editable ? handleApprove : undefined}
+                />
               )}
-
-              <div ref={messagesEndRef} />
             </div>
-          </main>
 
-          {activeArtifact && (
-            <ArtifactPanel
-              artifact={activeArtifact}
-              onClose={() => setActiveArtifact(null)}
-              onSave={handleArtifactSave}
-              onApprove={activeArtifact.type === 'plan' && activeArtifact.editable ? handleApprove : undefined}
-            />
-          )}
-        </div>
-
-        <footer className="input-area">
-          <form onSubmit={handleSubmit} className="input-form">
-            <textarea
-              ref={textareaRef}
-              value={input}
-              onChange={handleTextareaChange}
-              onKeyDown={handleKeyDown}
-              placeholder="Ask the research agent..."
-              disabled={isLoading}
-              rows={1}
-            />
-            <button type="submit" disabled={isLoading || !input.trim()}>
-              {isLoading ? <Loader2 size={18} className="spin" /> : <Send size={18} />}
-            </button>
-          </form>
-          <div className="mode-selector">
-            <button
-              className={`mode-btn ${executionMode === 'local' ? 'active' : ''}`}
-              onClick={() => setExecutionMode('local')}
-              type="button"
-            >
-              <Monitor size={14} />
-              Local
-            </button>
-            <button
-              className={`mode-btn ${executionMode === 'sandbox' ? 'active' : ''}`}
-              onClick={() => setExecutionMode('sandbox')}
-              type="button"
-            >
-              <Cloud size={14} />
-              Sandbox
-            </button>
-          </div>
-        </footer>
+            <footer className="input-area">
+              <form onSubmit={handleSubmit} className="claude-input">
+                <textarea
+                  ref={textareaRef}
+                  value={input}
+                  onChange={handleTextareaChange}
+                  onKeyDown={handleKeyDown}
+                  placeholder="Continue the conversation..."
+                  disabled={isLoading}
+                  rows={1}
+                />
+                <div className="claude-input-toolbar">
+                  <div className="toolbar-left">
+                    <button type="button" className="icon-btn" title="Attach files">
+                      <Plus size={18} />
+                    </button>
+                    <div className="mode-dropdown">
+                      <button
+                        type="button"
+                        className="mode-dropdown-trigger"
+                        onClick={() => setExecutionMode(executionMode === 'local' ? 'sandbox' : 'local')}
+                      >
+                        {executionMode === 'local' ? <Monitor size={14} /> : <Cloud size={14} />}
+                        <span>{executionMode === 'local' ? 'Local' : 'Sandbox'}</span>
+                        <ChevronDown size={14} />
+                      </button>
+                    </div>
+                  </div>
+                  <button type="submit" disabled={isLoading || !input.trim()} className="send-btn-arrow">
+                    {isLoading ? <Loader2 size={18} className="spin" /> : <ArrowUp size={18} strokeWidth={2.5} />}
+                  </button>
+                </div>
+              </form>
+            </footer>
+          </>
+        )}
       </div>
     </div>
   );

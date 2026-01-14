@@ -405,7 +405,6 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
-  border-bottom: 1px solid var(--border);
   background: var(--bg-primary);
   flex-shrink: 0;
 }
@@ -440,40 +439,190 @@ body {
   margin: 0 auto;
 }
 
-/* === Welcome === */
-.welcome {
-  text-align: center;
-  padding: 100px 20px 60px;
-}
-
-.welcome-icon {
-  display: inline-flex;
+/* === Landing Page (Centered Welcome) === */
+.landing {
+  display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  width: 56px;
-  height: 56px;
-  border-radius: var(--radius-lg);
-  background: linear-gradient(135deg, var(--accent), #8b5cf6);
-  margin-bottom: 20px;
-  color: white;
+  flex: 1;
+  min-height: 100%;
+  padding: 60px 24px;
 }
 
-.welcome h1 {
-  font-size: 24px;
-  font-weight: 600;
-  margin-bottom: 8px;
-  letter-spacing: -0.02em;
+.landing-content {
+  width: 100%;
+  max-width: 680px;
+  text-align: center;
 }
 
-.welcome p {
+.landing-title {
+  font-size: 32px;
+  font-weight: 500;
+  letter-spacing: -0.03em;
+  color: var(--text-primary);
+  margin-bottom: 12px;
+  line-height: 1.2;
+}
+
+.landing-subtitle {
+  font-size: 16px;
   color: var(--text-secondary);
-  max-width: 400px;
+  margin-bottom: 40px;
+  line-height: 1.5;
+}
+
+/* === Claude-Style Input === */
+.claude-input {
+  width: 100%;
+  max-width: 680px;
   margin: 0 auto;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  overflow: hidden;
+  transition: border-color 0.2s ease;
+}
+
+.input-area .claude-input {
+  max-width: 720px;
+}
+
+.claude-input:focus-within {
+  border-color: var(--border-hover);
+}
+
+.claude-input textarea {
+  width: 100%;
+  padding: 16px 20px;
+  background: transparent;
+  border: none;
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  resize: none;
+  min-height: 52px;
+  max-height: 200px;
+  font-family: inherit;
+}
+
+.claude-input textarea::placeholder {
+  color: var(--text-muted);
+}
+
+.claude-input textarea:focus {
+  outline: none;
+}
+
+/* === Claude Input Toolbar === */
+.claude-input-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px 12px 12px;
+}
+
+.toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Icon Button (Plus) */
+.icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.icon-btn:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+/* Mode Dropdown */
+.mode-dropdown {
+  position: relative;
+}
+
+.mode-dropdown-trigger {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.mode-dropdown-trigger:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.mode-dropdown-trigger span {
+  font-size: 13px;
+}
+
+.mode-dropdown-trigger svg:last-child {
+  opacity: 0.6;
+}
+
+/* Send Button with Arrow */
+.send-btn-arrow {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  border: none;
+  background: var(--accent);
+  color: white;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+}
+
+.send-btn-arrow:hover:not(:disabled) {
+  background: #0c93d4;
+  transform: translateY(-1px);
+}
+
+.send-btn-arrow:disabled {
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+  cursor: not-allowed;
 }
 
 /* === Messages === */
 .message {
   margin-bottom: 24px;
+  animation: fade-in 0.3s ease-out;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .message.user {
@@ -1053,7 +1202,6 @@ body {
 
 /* === Input Area === */
 .input-area {
-  border-top: 1px solid var(--border);
   padding: 16px 20px 20px;
   background: var(--bg-primary);
 }
