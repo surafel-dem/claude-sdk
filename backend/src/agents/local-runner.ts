@@ -53,8 +53,20 @@ export async function* runLocal(task: string, sessionId?: string): AsyncGenerato
                 maxTurns: 15,
                 cwd: sessionDir,
                 permissionMode: 'acceptEdits',
+                includePartialMessages: true,  // Enable real-time streaming
             }
         })) {
+            // Handle real-time token streaming
+            if (msg.type === 'stream_event') {
+                const event = (msg as any).event;
+                if (event.type === 'content_block_delta' &&
+                    event.delta?.type === 'text_delta' &&
+                    event.delta?.text) {
+                    yield { type: 'text', content: event.delta.text };
+                }
+                continue;
+            }
+
             if (msg.type === 'assistant' && msg.message?.content) {
                 for (const block of msg.message.content) {
                     // Handle tool calls
@@ -97,11 +109,7 @@ export async function* runLocal(task: string, sessionId?: string): AsyncGenerato
                         console.log(`[local] Yielded: tool -> ${toolName}`);
                     }
 
-                    // Handle text
-                    if ('text' in block && block.text) {
-                        yield { type: 'text', content: block.text };
-                        console.log(`[local] Yielded: text (${block.text.length} chars)`);
-                    }
+                    // Skip text blocks - we get these from stream_event now
                 }
             }
         }

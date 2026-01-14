@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, type FormEvent } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@convex/_generated/api';
 import type { Id } from '@convex/_generated/dataModel';
@@ -429,6 +430,11 @@ function MessageContent({ parts, isStreaming, onArtifactClick }: {
     }
   }
 
+  // Don't render anything if there's no content
+  if (contentGroups.length === 0 && allActivities.length === 0) {
+    return null;
+  }
+
   return (
     <div className="message-content">
       {contentGroups.map((group, i) => {
@@ -451,6 +457,9 @@ function MessageContent({ parts, isStreaming, onArtifactClick }: {
 
 // === Main App ===
 function MainApp() {
+  const { threadId: urlThreadId } = useParams<{ threadId?: string }>();
+  const navigate = useNavigate();
+
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -460,8 +469,10 @@ function MainApp() {
   const [executionMode, setExecutionMode] = useState<'local' | 'sandbox'>('local');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const isStreamingRef = useRef(false);  // Track if we're streaming
   const currentRunIdRef = useRef<string | null>(null);  // Track current run for continuation
+
+  // Sync lock: prevents Convex from overwriting streaming state
+  const [syncLocked, setSyncLocked] = useState(false);
 
   // Store artifacts separately so Convex sync doesn't kill them
   const artifactsRef = useRef<Map<number, Artifact>>(new Map());
@@ -473,17 +484,43 @@ function MainApp() {
     activeThreadId ? { threadId: activeThreadId } : "skip"
   );
 
-  // Load messages when thread changes - BUT preserve artifacts!
+  // Query persisted artifacts for the thread
+  const threadArtifacts = useQuery(
+    api.artifacts.listByThread,
+    activeThreadId ? { threadId: activeThreadId } : "skip"
+  );
+
+  // Load messages when thread changes - BUT respect sync lock!
   // This prevents Convex real-time updates from overwriting streaming artifacts
   useEffect(() => {
-    // Don't sync while streaming - streaming has the authoritative data
-    if (isStreamingRef.current) {
+    // Don't sync while sync is locked (streaming in progress)
+    if (syncLocked) {
+      console.log('[Sync] Skipping sync - locked');
       return;
     }
 
+    console.log('[Sync] Running sync effect', {
+      threadMessages: threadMessages?.length || 0,
+      threadArtifacts: threadArtifacts?.length || 0,
+      localArtifacts: artifactsRef.current.size
+    });
+
     if (threadMessages) {
-      // When syncing from Convex, preserve any artifacts we captured during streaming
-      const loadedMessages: Message[] = threadMessages.map((msg: { role: string; content: string }, index: number) => {
+      // Debug: Log all artifacts from Convex
+      if (threadArtifacts) {
+        console.log('[Sync] Artifacts from Convex:', threadArtifacts.map((a: any) => ({
+          type: a.type,
+          title: a.title,
+          createdAt: a.createdAt,
+          id: a._id
+        })));
+      }
+
+      // Track which artifacts have been assigned to prevent duplicates
+      const usedArtifactIds = new Set<string>();
+
+      // When syncing from Convex, merge in persisted artifacts
+      const loadedMessages: Message[] = threadMessages.map((msg: { role: string; content: string; createdAt: number }, index: number) => {
         // Hide approval messages completely from display
         let content = msg.content;
         if (content.startsWith('APPROVED:')) {
@@ -492,10 +529,46 @@ function MainApp() {
 
         const parts: MessagePart[] = [{ type: 'text', content }];
 
-        // Restore artifact if we have one for this message index
-        const artifact = artifactsRef.current.get(index);
-        if (artifact) {
-          parts.push({ type: 'artifact', content: '', artifact });
+        // Only attach artifacts to assistant messages (not user messages)
+        if (msg.role === 'assistant') {
+          // First check local ref (during streaming), then check Convex persisted artifacts
+          const localArtifact = artifactsRef.current.get(index);
+          if (localArtifact) {
+            console.log(`[Sync] Msg ${index}: Using local artifact`, localArtifact.type);
+            parts.push({ type: 'artifact', content: '', artifact: localArtifact });
+          } else if (threadArtifacts) {
+            // Find artifact created around same time as this message (within 2 minutes)
+            // Use filter + find to avoid matching same artifact to multiple messages
+            console.log(`[Sync] Msg ${index}: Looking for artifact, msg.createdAt=${msg.createdAt}`);
+
+            const persistedArtifact = threadArtifacts.find((a: any) => {
+              // Skip already-used artifacts
+              if (usedArtifactIds.has(a._id)) return false;
+              const match = a.createdAt >= msg.createdAt - 5000 && a.createdAt <= msg.createdAt + 120000;
+              console.log(`  Checking artifact ${a.type}: createdAt=${a.createdAt}, match=${match}`);
+              return match;
+            });
+
+            if (persistedArtifact) {
+              usedArtifactIds.add(persistedArtifact._id);  // Mark as used
+              console.log(`[Sync] Msg ${index}: Found matching artifact`, persistedArtifact.type);
+              // Set editable based on status - if status is 'draft', it's waiting for approval
+              const isEditable = persistedArtifact.type === 'plan' && persistedArtifact.status === 'draft';
+              parts.push({
+                type: 'artifact',
+                content: '',
+                artifact: {
+                  id: persistedArtifact._id,
+                  type: persistedArtifact.type as 'plan' | 'report',
+                  title: persistedArtifact.title,
+                  content: persistedArtifact.content,
+                  editable: isEditable
+                }
+              });
+            } else {
+              console.log(`[Sync] Msg ${index}: No matching artifact found`);
+            }
+          }
         }
 
         return {
@@ -503,27 +576,40 @@ function MainApp() {
           parts
         };
       });
+
+      console.log('[Sync] Setting messages, total:', loadedMessages.length);
       setMessages(loadedMessages);
     } else {
       setMessages([]);
       artifactsRef.current.clear();  // Clear artifacts when thread is cleared
     }
-  }, [threadMessages]);
+  }, [threadMessages, threadArtifacts, syncLocked]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, currentParts]);
 
+  // Sync threadId from URL on mount/URL change
+  useEffect(() => {
+    if (urlThreadId && urlThreadId !== activeThreadId) {
+      setActiveThreadId(urlThreadId as Id<"threads">);
+      setCurrentParts([]);
+      setActiveArtifact(null);
+    }
+  }, [urlThreadId]);
+
   const handleNewThread = async () => {
     setActiveThreadId(null);
     setMessages([]);
     setCurrentParts([]);
+    navigate('/');
   };
 
   const handleSelectThread = (threadId: Id<"threads">) => {
     setActiveThreadId(threadId);
     setCurrentParts([]);
     setActiveArtifact(null);
+    navigate(`/chat/${threadId}`);
   };
 
   const handleTextareaChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -548,14 +634,17 @@ function MainApp() {
       const title = userMessage.slice(0, 50) + (userMessage.length > 50 ? '...' : '');
       threadId = await createThread({ title });
       setActiveThreadId(threadId);
+      navigate(`/chat/${threadId}`);
     }
 
-    // Save user message to Convex
-    await sendMessage({ threadId, role: 'user', content: userMessage });
-
+    // Show user message IMMEDIATELY (don't wait for Convex)
     setMessages(prev => [...prev, { role: 'user', parts: [{ type: 'text', content: userMessage }] }]);
     setIsLoading(true);
     setCurrentParts([]);
+    setSyncLocked(true);  // Lock sync during streaming
+
+    // Save user message to Convex in background (non-blocking)
+    sendMessage({ threadId, role: 'user', content: userMessage });
 
     try {
       // Include credentials for auth cookie
@@ -567,7 +656,6 @@ function MainApp() {
       });
 
       const data = await chatResponse.json();
-      isStreamingRef.current = true;  // Mark streaming started
       currentRunIdRef.current = data.runId;  // Store runId for continuation
       const eventSource = new EventSource(`http://localhost:3001/api/stream/${data.runId}`);
       let parts: MessagePart[] = [];
@@ -651,19 +739,20 @@ function MainApp() {
         setMessages(prev => [...prev, { role: 'assistant', parts: [...parts] }]);
         setCurrentParts([]);
         setIsLoading(false);
-        isStreamingRef.current = false;  // Mark streaming ended
+        // Unlock sync after delay to let Convex propagate
+        setTimeout(() => setSyncLocked(false), 2000);
       });
 
       eventSource.addEventListener('error', () => {
         eventSource.close();
         setCurrentParts([]);
         setIsLoading(false);
-        isStreamingRef.current = false;  // Mark streaming ended
+        setTimeout(() => setSyncLocked(false), 1000);
       });
     } catch (error) {
       console.error('Error:', error);
       setIsLoading(false);
-      isStreamingRef.current = false;  // Mark streaming ended
+      setSyncLocked(false);
     }
   };
 
@@ -692,7 +781,7 @@ function MainApp() {
     const planContent = activeArtifact.content;
     setActiveArtifact(null);
     setIsLoading(true);
-    isStreamingRef.current = true;
+    setSyncLocked(true);
 
     // Update the artifact in messages to show as approved
     setMessages(prev => prev.map(msg => ({
@@ -800,12 +889,13 @@ function MainApp() {
       setMessages(prev => [...prev, { role: 'assistant', parts: [...parts] }]);
       setCurrentParts([]);
       setIsLoading(false);
-      isStreamingRef.current = false;
+      // Unlock sync after delay to let Convex propagate
+      setTimeout(() => setSyncLocked(false), 2000);
 
     } catch (error) {
       console.error('Approval error:', error);
       setIsLoading(false);
-      isStreamingRef.current = false;
+      setSyncLocked(false);
     }
   };
 
@@ -857,6 +947,18 @@ function MainApp() {
                   </button>
                 </div>
               </form>
+
+              <div className="suggestion-chips">
+                <button onClick={() => setInput("Research the latest trends in AI agents")} className="chip">
+                  AI agent trends
+                </button>
+                <button onClick={() => setInput("Compare React vs Vue for building apps")} className="chip">
+                  React vs Vue
+                </button>
+                <button onClick={() => setInput("Explain how transformers work in LLMs")} className="chip">
+                  Transformers in LLMs
+                </button>
+              </div>
             </div>
           </div>
         ) : (
@@ -865,11 +967,21 @@ function MainApp() {
             <div className="main-container">
               <main className="chat-area">
                 <div className="messages">
-                  {messages.map((msg, i) => (
-                    <div key={i} className={`message ${msg.role}`}>
-                      <MessageContent parts={msg.parts} onArtifactClick={setActiveArtifact} />
-                    </div>
-                  ))}
+                  {messages.map((msg, i) => {
+                    // Skip rendering if message has no meaningful content
+                    const hasContent = msg.parts.some(p =>
+                      (p.type === 'text' && p.content.trim()) ||
+                      p.type === 'artifact' ||
+                      (p.type === 'activity' && p.activities?.length)
+                    );
+                    if (!hasContent) return null;
+
+                    return (
+                      <div key={i} className={`message ${msg.role}`}>
+                        <MessageContent parts={msg.parts} onArtifactClick={setActiveArtifact} />
+                      </div>
+                    );
+                  })}
 
                   {(currentParts.length > 0 || isLoading) && (
                     <div className="message assistant">
@@ -877,7 +989,7 @@ function MainApp() {
                         <MessageContent parts={currentParts} isStreaming onArtifactClick={setActiveArtifact} />
                       ) : (
                         <div className="status-indicator">
-                          <span className="status-shimmer">Creating research plan...</span>
+                          <span className="status-shimmer">Thinking...</span>
                         </div>
                       )}
                     </div>

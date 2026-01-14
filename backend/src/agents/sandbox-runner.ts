@@ -63,6 +63,20 @@ export async function* runSandbox(task: string): AsyncGenerator<StreamEvent> {
             onStdout: (line) => {
                 try {
                     const msg = JSON.parse(line);
+
+                    // Handle real-time token streaming
+                    if (msg.type === 'stream_event') {
+                        const event = msg.event;
+                        if (event?.type === 'content_block_delta' &&
+                            event.delta?.type === 'text_delta' &&
+                            event.delta?.text) {
+                            pendingEvents.push({
+                                type: 'text',
+                                content: event.delta.text
+                            });
+                        }
+                    }
+
                     if (msg.type === 'assistant' && msg.message?.content) {
                         for (const block of msg.message.content) {
                             if ('name' in block && 'input' in block) {
@@ -158,6 +172,7 @@ for await (const msg of query({
         maxTurns: 10,
         cwd: '${FILES_DIR}',
         permissionMode: 'acceptEdits',
+        includePartialMessages: true,  // Enable real-time streaming
     }
 })) {
     console.log(JSON.stringify(msg));

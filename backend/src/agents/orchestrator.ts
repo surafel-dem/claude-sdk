@@ -90,8 +90,20 @@ export async function* runPlanning(runId: string): AsyncGenerator<StreamEvent> {
             maxTurns: 5,
             model: 'sonnet',
             cwd: './workspace',
+            includePartialMessages: true,  // Enable real-time streaming
         }
     })) {
+        // Handle real-time token streaming
+        if (msg.type === 'stream_event') {
+            const event = msg.event as any;
+            if (event.type === 'content_block_delta' &&
+                event.delta?.type === 'text_delta' &&
+                event.delta?.text) {
+                yield { type: 'text', content: event.delta.text };
+            }
+            continue;
+        }
+
         const events = translateMessage(msg);
         for (const event of events) {
             // Capture plan content from Write tool
@@ -162,9 +174,8 @@ function translateMessage(msg: SDKMessage): StreamEvent[] {
 
     if (msg.type === 'assistant' && msg.message?.content) {
         for (const block of msg.message.content) {
-            if ('text' in block) {
-                events.push({ type: 'text', content: block.text });
-            }
+            // Skip text blocks - we get these from stream_event now
+            // Only extract tool calls
             if ('name' in block && 'input' in block) {
                 events.push({
                     type: 'tool',

@@ -19,6 +19,7 @@ import {
     runPlanning,
     runResearch
 } from './agents/index.js';
+import { createArtifact, updateArtifact } from './lib/convex.js';
 
 const app = new Hono();
 
@@ -71,6 +72,17 @@ app.get('/api/stream/:runId', async c => {
     return streamSSE(c, async stream => {
         try {
             for await (const event of runPlanning(runId)) {
+                // Save artifact to Convex when emitted
+                if (event.type === 'artifact' && event.content) {
+                    try {
+                        const artifactData = JSON.parse(event.content);
+                        await createArtifact(runId, artifactData.type, artifactData.title || 'Plan', artifactData.content);
+                        console.log(`[server] Saved ${artifactData.type} artifact to Convex`);
+                    } catch (e) {
+                        console.error('[server] Failed to save artifact:', e);
+                    }
+                }
+
                 await stream.writeSSE({
                     event: event.type,
                     data: event.content || ''
@@ -118,6 +130,18 @@ app.post('/api/continue/:runId', async c => {
             for await (const event of runResearch(runId)) {
                 eventCount++;
 
+                // Save artifact to Convex when emitted
+                if (event.type === 'artifact') {
+                    try {
+                        const content = event.content || (event.data ? JSON.stringify(event.data) : '');
+                        const artifactData = JSON.parse(content);
+                        await createArtifact(runId, artifactData.type, artifactData.title || 'Report', artifactData.content);
+                        console.log(`[server] Saved ${artifactData.type} artifact to Convex`);
+                    } catch (e) {
+                        console.error('[server] Failed to save artifact:', e);
+                    }
+                }
+
                 // For tool events, send the full data as JSON
                 const data = event.type === 'tool' && event.data
                     ? JSON.stringify(event.data)
@@ -136,6 +160,26 @@ app.post('/api/continue/:runId', async c => {
             await stream.writeSSE({ event: 'error', data: String(error) });
         }
     });
+});
+
+/**
+ * PUT /api/artifacts/:id — Update an artifact
+ */
+app.put('/api/artifacts/:id', async c => {
+    const id = c.req.param('id');
+    const { content } = await c.req.json<{ content: string }>();
+
+    if (!content) {
+        return c.json({ error: 'Content required' }, 400);
+    }
+
+    const success = await updateArtifact(id, { content });
+    if (!success) {
+        return c.json({ error: 'Failed to update artifact' }, 500);
+    }
+
+    console.log(`[server] Updated artifact: ${id}`);
+    return c.json({ ok: true });
 });
 
 /**

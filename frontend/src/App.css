@@ -1,26 +1,36 @@
-/* === Design System === */
+/* === Design System - Warm Tan Theme === */
 :root {
-  --bg-primary: #0d0d0d;
-  --bg-secondary: #141414;
-  --bg-tertiary: #1a1a1a;
-  --bg-hover: #1f1f1f;
-  --bg-elevated: #242424;
-  --text-primary: #fafafa;
-  --text-secondary: #999;
-  --text-muted: #555;
-  --border: #2a2a2a;
-  --border-hover: #3a3a3a;
-  --accent: #0ea5e9;
-  --accent-soft: rgba(14, 165, 233, 0.1);
-  --success: #22c55e;
+  /* Backgrounds - warm cream/tan */
+  --bg-primary: #faf8f5;
+  --bg-secondary: #f5f3f0;
+  --bg-tertiary: #ebe9e6;
+  --bg-hover: #e6e4e1;
+  --bg-elevated: #ffffff;
+  /* Text - dark with warm undertones */
+  --text-primary: #1a1a1a;
+  --text-secondary: #6b6b6b;
+  --text-muted: #999999;
+  /* Borders - soft warm gray */
+  --border: #e6e4e1;
+  --border-hover: #d4cfc6;
+  /* Accent - warm brown */
+  --accent: #8b7355;
+  --accent-soft: rgba(139, 115, 85, 0.1);
+  /* Status */
+  --success: #5a9a6b;
+  /* Radii and fonts */
   --radius-sm: 6px;
   --radius-md: 10px;
   --radius-lg: 14px;
-  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
   --font-mono: 'SF Mono', 'Fira Code', monospace;
-  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.3);
-  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.4);
+  /* Shadows - softer for light theme */
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.08);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.12);
   --sidebar-width: 260px;
+  /* Code blocks */
+  --code-bg: #f0ece4;
+  --code-border: #e6e4e1;
 }
 
 * {
@@ -223,7 +233,7 @@ body {
 .sidebar {
   width: var(--sidebar-width);
   background: var(--bg-secondary);
-  border-right: 1px solid var(--border);
+  box-shadow: 2px 0 8px rgba(0, 0, 0, 0.04);
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
@@ -303,7 +313,6 @@ body {
 
 .thread-item.active {
   background: var(--bg-tertiary);
-  border-left: 2px solid var(--accent);
 }
 
 .thread-info {
@@ -472,16 +481,44 @@ body {
   line-height: 1.5;
 }
 
+/* === Suggestion Chips === */
+.suggestion-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 20px;
+  justify-content: center;
+}
+
+.chip {
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.chip:hover {
+  background: var(--bg-tertiary);
+  border-color: var(--border-hover);
+  color: var(--text-primary);
+}
+
 /* === Claude-Style Input === */
 .claude-input {
   width: 100%;
   max-width: 680px;
   margin: 0 auto;
-  background: var(--bg-secondary);
+  background: var(--bg-elevated);
   border: 1px solid var(--border);
   border-radius: 20px;
   overflow: hidden;
   transition: border-color 0.2s ease;
+  box-shadow: var(--shadow-sm);
 }
 
 .input-area .claude-input {
@@ -609,8 +646,22 @@ body {
 
 /* === Messages === */
 .message {
-  margin-bottom: 24px;
+  margin-bottom: 18px;
   animation: fade-in 0.3s ease-out;
+}
+
+/* User message - subtle background bubble */
+.message.user .message-content {
+  background: var(--bg-tertiary);
+  padding: 8px 14px;
+  border-radius: 14px;
+  display: inline-block;
+  max-width: 85%;
+}
+
+/* Assistant message - clean, full width */
+.message.assistant .message-content {
+  padding: 4px 0;
 }
 
 @keyframes fade-in {
@@ -623,11 +674,6 @@ body {
     opacity: 1;
     transform: translateY(0);
   }
-}
-
-.message.user {
-  padding-left: 16px;
-  border-left: 2px solid var(--border);
 }
 
 .message-content {
