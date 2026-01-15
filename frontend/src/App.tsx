@@ -27,7 +27,7 @@ interface Artifact {
 }
 
 // Helper to parse server artifact data
-function parseArtifact(data: { type: string; content: string }): Artifact {
+function parseArtifact(data: { type: string; content: string; id?: string; title?: string }): Artifact {
   // Basic validation
   if (!data || typeof data.content !== 'string') {
     throw new Error('Invalid artifact data');
@@ -38,22 +38,25 @@ function parseArtifact(data: { type: string; content: string }): Artifact {
     throw new Error('Content too short');
   }
 
+  // Use server-provided ID if available, otherwise generate one (fallback)
+  const id = data.id || crypto.randomUUID();
+
   // For plans, check for the expected format
   if (data.type === 'plan') {
     const titleMatch = content.match(/## Research:\s*([^\n]+)/);
     return {
-      id: crypto.randomUUID(),
+      id,
       type: 'plan',
-      title: titleMatch ? titleMatch[1].trim() : 'Research Plan',
+      title: data.title || (titleMatch ? titleMatch[1].trim() : 'Research Plan'),
       content,
       editable: true,
     };
   }
 
   return {
-    id: crypto.randomUUID(),
+    id,
     type: data.type as 'plan' | 'report',
-    title: data.type === 'report' ? 'Research Report' : 'Document',
+    title: data.title || (data.type === 'report' ? 'Research Report' : 'Document'),
     content,
     editable: false,
   };
@@ -479,6 +482,7 @@ function MainApp() {
 
   const createThread = useMutation(api.threads.create);
   const sendMessage = useMutation(api.messages.send);
+  const updateArtifact = useMutation(api.artifacts.update);
   const threadMessages = useQuery(
     api.messages.list,
     activeThreadId ? { threadId: activeThreadId } : "skip"
@@ -764,15 +768,14 @@ function MainApp() {
   };
 
   const handleArtifactSave = async (content: string) => {
-    if (!activeArtifact) return;
+    if (!activeArtifact?.id) return;
     try {
-      await fetch(`http://localhost:3001/api/artifacts/${activeArtifact.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content }),
-      });
+      // Use Convex mutation directly - real-time sync handles the rest
+      await updateArtifact({ id: activeArtifact.id, content });
       setActiveArtifact(prev => prev ? { ...prev, content } : null);
-    } catch { /* ignore */ }
+    } catch (e) {
+      console.error('[Artifact] Failed to save:', e);
+    }
   };
 
   const handleApprove = async () => {

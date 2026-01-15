@@ -41,16 +41,24 @@ export const create = mutation({
 // Update an artifact
 export const update = mutation({
     args: {
-        id: v.id("artifacts"),
+        id: v.string(),
         content: v.optional(v.string()),
         status: v.optional(v.string()),
     },
+    returns: v.union(v.string(), v.null()),
     handler: async (ctx, args) => {
-        const updates: any = { updatedAt: Date.now() };
+        // Normalize string to Convex ID
+        const artifactId = ctx.db.normalizeId("artifacts", args.id);
+        if (!artifactId) {
+            console.error("[artifacts:update] Invalid ID:", args.id);
+            return null;
+        }
+
+        const updates: Record<string, unknown> = { updatedAt: Date.now() };
         if (args.content !== undefined) updates.content = args.content;
         if (args.status !== undefined) updates.status = args.status;
 
-        await ctx.db.patch(args.id, updates);
+        await ctx.db.patch(artifactId, updates);
         return args.id;
     },
 });

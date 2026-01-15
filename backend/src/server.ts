@@ -1,7 +1,7 @@
 /**
- * Research Agent Server — Clean Two-Phase
- * 
- * Flow:
+ * Research Agent Server
+ *
+ * Two-phase flow with session persistence:
  * 1. POST /api/chat → Init run, return runId
  * 2. GET /api/stream/:runId → Stream Phase 1 (planning)
  * 3. POST /api/continue/:runId → Approve and stream Phase 2 (research)
@@ -12,194 +12,198 @@ import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
 import { streamSSE } from 'hono/streaming';
 import { cors } from 'hono/cors';
+import { logger } from 'hono/logger';
+import { zValidator } from '@hono/zod-validator';
+import { z } from 'zod';
 import {
     initRun,
     getRunState,
     approveRun,
     runPlanning,
-    runResearch
+    runResearch,
 } from './agents/index.js';
-import { createArtifact, updateArtifact } from './lib/convex.js';
+import { createArtifact, getSession } from './lib/convex.js';
+
+// =============================================================================
+// Validation Schemas
+// =============================================================================
+
+const chatSchema = z.object({
+    message: z.string().min(1),
+    threadId: z.string().optional(),
+    mode: z.enum(['local', 'sandbox']).default('local'),
+});
+
+const continueSchema = z.object({
+    action: z.enum(['approve', 'reject']).default('approve'),
+    plan: z.string().optional(),
+});
+
+// =============================================================================
+// App Setup
+// =============================================================================
 
 const app = new Hono();
 
-app.use('/*', cors({
-    origin: ['http://localhost:5173', 'http://localhost:3000'],
-    credentials: true
-}));
+app.use('*', logger());
+app.use(
+    '*',
+    cors({
+        origin: ['http://localhost:5173', 'http://localhost:3000'],
+        credentials: true,
+    })
+);
 
-app.get('/health', c => c.json({ status: 'ok' }));
+// =============================================================================
+// Routes
+// =============================================================================
 
-/**
- * POST /api/chat — Initialize run
- */
-app.post('/api/chat', async c => {
-    const { message, threadId, mode } = await c.req.json<{
-        message: string;
-        threadId?: string;
-        mode?: 'local' | 'sandbox'
-    }>();
-    if (!message) return c.json({ error: 'Message required' }, 400);
+const routes = app
+    .get('/health', (c) => c.json({ status: 'ok' }, 200))
 
-    const runId = threadId || crypto.randomUUID();
-    initRun(runId, message, mode || 'local');
+    // Initialize run (checks for existing session)
+    .post('/api/chat', zValidator('json', chatSchema), async (c) => {
+        const { message, threadId, mode } = c.req.valid('json');
+        const runId = threadId || crypto.randomUUID();
 
-    console.log(`[server] Run initialized: ${runId} (mode: ${mode || 'local'})`);
-    return c.json({ runId, threadId: runId });
-});
+        const state = await initRun(runId, message, mode);
+        console.log(`[server] Run ${runId}: phase=${state.phase}, mode=${mode}`);
 
-/**
- * GET /api/stream/:runId — Stream Phase 1 (Planning)
- */
-app.get('/api/stream/:runId', async c => {
-    const runId = c.req.param('runId');
-    const state = getRunState(runId);
+        return c.json({ runId, threadId: runId, phase: state.phase }, 200);
+    })
 
-    if (!state) {
-        return c.json({ error: 'Run not found' }, 404);
-    }
+    // Stream planning phase
+    .get('/api/stream/:runId', (c) => {
+        const runId = c.req.param('runId');
+        const state = getRunState(runId);
 
-    // Only run planning if in planning phase
-    if (state.phase !== 'planning') {
-        return streamSSE(c, async stream => {
-            await stream.writeSSE({
-                event: 'error',
-                data: `Already past planning phase: ${state.phase}`
+        if (!state) {
+            return c.json({ error: 'Run not found' }, 404);
+        }
+
+        if (state.phase !== 'planning') {
+            return streamSSE(c, async (stream) => {
+                await stream.writeSSE({
+                    event: 'info',
+                    data: JSON.stringify({ phase: state.phase, plan: state.plan }),
+                });
+                await stream.writeSSE({ event: 'done', data: state.phase });
             });
-        });
-    }
+        }
 
-    return streamSSE(c, async stream => {
-        try {
-            for await (const event of runPlanning(runId)) {
-                // Save artifact to Convex when emitted
-                if (event.type === 'artifact' && event.content) {
-                    try {
-                        const artifactData = JSON.parse(event.content);
-                        await createArtifact(runId, artifactData.type, artifactData.title || 'Plan', artifactData.content);
-                        console.log(`[server] Saved ${artifactData.type} artifact to Convex`);
-                    } catch (e) {
-                        console.error('[server] Failed to save artifact:', e);
+        return streamSSE(
+            c,
+            async (stream) => {
+                for await (const event of runPlanning(runId)) {
+                    if (event.type === 'artifact') {
+                        try {
+                            const data = JSON.parse(event.content);
+                            // Create in Convex and get the real ID
+                            const result = await createArtifact(runId, data.type, data.title, data.content);
+                            // Include Convex ID in the event
+                            const eventData = { ...data, id: result?.id };
+                            await stream.writeSSE({ event: event.type, data: JSON.stringify(eventData) });
+                        } catch (e) {
+                            console.error('[artifact error]', e);
+                            await stream.writeSSE({ event: event.type, data: event.content });
+                        }
+                    } else {
+                        await stream.writeSSE({ event: event.type, data: event.content });
                     }
                 }
-
-                await stream.writeSSE({
-                    event: event.type,
-                    data: event.content || ''
-                });
+            },
+            async (err, stream) => {
+                console.error('[planning error]', err);
+                await stream.writeSSE({ event: 'error', data: String(err) });
             }
-        } catch (error) {
-            console.error('[planning error]', error);
-            await stream.writeSSE({ event: 'error', data: String(error) });
+        );
+    })
+
+    // Approve and run research phase
+    .post('/api/continue/:runId', zValidator('json', continueSchema), async (c) => {
+        const runId = c.req.param('runId');
+        const { action, plan } = c.req.valid('json');
+
+        const state = getRunState(runId);
+        if (!state) {
+            return c.json({ error: 'Run not found' }, 404);
         }
-    });
-});
 
-/**
- * POST /api/continue/:runId — Approve and run Phase 2 (Research)
- * 
- * This endpoint:
- * 1. Approves the run
- * 2. Returns SSE stream of research results
- */
-app.post('/api/continue/:runId', async c => {
-    const runId = c.req.param('runId');
-    const body = await c.req.json<{ action: 'approve' | 'reject'; plan?: string }>()
-        .catch(() => ({ action: 'approve' as const, plan: undefined }));
+        if (action === 'reject') {
+            return c.json({ ok: true, message: 'Cancelled' }, 200);
+        }
 
-    const state = getRunState(runId);
-    if (!state) {
-        return c.json({ error: 'Run not found' }, 404);
-    }
+        const approved = await approveRun(runId, plan);
+        if (!approved) {
+            return c.json({ error: `Cannot approve in phase: ${state.phase}` }, 400);
+        }
 
-    if (body.action === 'reject') {
-        return c.json({ ok: true, message: 'Research cancelled' });
-    }
-
-    // Approve the run
-    if (!approveRun(runId, body.plan)) {
-        return c.json({ error: `Cannot approve run in phase: ${state.phase}` }, 400);
-    }
-
-    // Stream Phase 2 (Research)
-    return streamSSE(c, async stream => {
-        console.log(`[sse] Starting SSE stream for runId: ${runId}`);
-        let eventCount = 0;
-
-        try {
-            for await (const event of runResearch(runId)) {
-                eventCount++;
-
-                // Save artifact to Convex when emitted
-                if (event.type === 'artifact') {
-                    try {
-                        const content = event.content || (event.data ? JSON.stringify(event.data) : '');
-                        const artifactData = JSON.parse(content);
-                        await createArtifact(runId, artifactData.type, artifactData.title || 'Report', artifactData.content);
-                        console.log(`[server] Saved ${artifactData.type} artifact to Convex`);
-                    } catch (e) {
-                        console.error('[server] Failed to save artifact:', e);
+        return streamSSE(
+            c,
+            async (stream) => {
+                for await (const event of runResearch(runId)) {
+                    if (event.type === 'artifact') {
+                        try {
+                            const data = JSON.parse(event.content);
+                            // Create in Convex and get the real ID
+                            const result = await createArtifact(runId, data.type, data.title, data.content);
+                            // Include Convex ID in the event
+                            const eventData = { ...data, id: result?.id };
+                            await stream.writeSSE({ event: event.type, data: JSON.stringify(eventData) });
+                        } catch (e) {
+                            console.error('[artifact error]', e);
+                            await stream.writeSSE({ event: event.type, data: event.content });
+                        }
+                    } else if (event.type === 'tool' && event.data) {
+                        await stream.writeSSE({ event: event.type, data: JSON.stringify(event.data) });
+                    } else {
+                        await stream.writeSSE({ event: event.type, data: event.content });
                     }
                 }
-
-                // For tool events, send the full data as JSON
-                const data = event.type === 'tool' && event.data
-                    ? JSON.stringify(event.data)
-                    : event.content || '';
-
-                console.log(`[sse] Event #${eventCount}: ${event.type} -> ${data.slice(0, 80)}...`);
-
-                await stream.writeSSE({
-                    event: event.type,
-                    data
-                });
+            },
+            async (err, stream) => {
+                console.error('[research error]', err);
+                await stream.writeSSE({ event: 'error', data: String(err) });
             }
-            console.log(`[sse] Stream complete. Total events: ${eventCount}`);
-        } catch (error) {
-            console.error('[sse] Stream error:', error);
-            await stream.writeSSE({ event: 'error', data: String(error) });
+        );
+    })
+
+    // Get run status (with session lookup)
+    .get('/api/status/:runId', async (c) => {
+        const runId = c.req.param('runId');
+
+        // Check in-memory first
+        const state = getRunState(runId);
+        if (state) {
+            return c.json({
+                exists: true,
+                phase: state.phase,
+                hasPlan: !!state.plan,
+                mode: state.mode,
+            }, 200);
         }
+
+        // Check Convex for persisted session
+        const session = await getSession(runId);
+        if (session) {
+            return c.json({
+                exists: true,
+                phase: session.phase,
+                hasPlan: !!session.plan,
+                mode: session.mode,
+                persisted: true,
+            }, 200);
+        }
+
+        return c.json({ exists: false }, 200);
     });
-});
 
-/**
- * PUT /api/artifacts/:id — Update an artifact
- */
-app.put('/api/artifacts/:id', async c => {
-    const id = c.req.param('id');
-    const { content } = await c.req.json<{ content: string }>();
+// =============================================================================
+// Export & Start
+// =============================================================================
 
-    if (!content) {
-        return c.json({ error: 'Content required' }, 400);
-    }
-
-    const success = await updateArtifact(id, { content });
-    if (!success) {
-        return c.json({ error: 'Failed to update artifact' }, 500);
-    }
-
-    console.log(`[server] Updated artifact: ${id}`);
-    return c.json({ ok: true });
-});
-
-/**
- * GET /api/status/:runId — Check run status
- */
-app.get('/api/status/:runId', async c => {
-    const runId = c.req.param('runId');
-    const state = getRunState(runId);
-
-    if (!state) {
-        return c.json({ exists: false });
-    }
-
-    return c.json({
-        exists: true,
-        phase: state.phase,
-        hasPlan: !!state.plan
-    });
-});
+export type AppType = typeof routes;
 
 const PORT = parseInt(process.env.PORT || '3001');
-console.log(`\n🚀 Research Agent Server (Clean Two-Phase) - Port: ${PORT}\n`);
+console.log(`\n🚀 Research Agent Server - Port: ${PORT}\n`);
 serve({ fetch: app.fetch, port: PORT });

@@ -1,32 +1,19 @@
 /**
- * SDK Orchestrator — Clean Two-Phase Implementation
- * 
- * Phase 1: Planning - Create plan, emit artifact, store for Phase 2
- * Phase 2: Research - Routes to local or sandbox runner based on mode
- * 
- * State is managed per-run, enabling clean phase transitions.
+ * Orchestrator — Two-Phase Research Agent
+ *
+ * Phase 1: Planning - Create research plan
+ * Phase 2: Research - Execute plan via local or sandbox runner
+ *
+ * Persists session state to Convex for resumption.
  */
 
 import { query, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import { getSession, upsertSession, updateSessionPhase } from '../lib/convex.js';
+import { createStreamingHooks } from './hooks.js';
 
-
-// Run state management
-interface RunState {
-    phase: 'planning' | 'awaiting_approval' | 'researching' | 'done';
-    mode: 'local' | 'sandbox';
-    originalPrompt: string;
-    plan?: string;
-}
-
-const runStates = new Map<string, RunState>();
-
-// Simple planner prompt for testing
-const PLANNER_PROMPT = `You are a quick research planner.
-
-1. Write a 3-line plan to "plan.md": Topic, Goal, 2 search terms
-2. Say "Ready. Click Approve."
-
-Be VERY brief. Stop after writing plan.`;
+// =============================================================================
+// Types
+// =============================================================================
 
 export type StreamEvent = {
     type: string;
@@ -34,42 +21,92 @@ export type StreamEvent = {
     data?: unknown;
 };
 
+export type Phase = 'planning' | 'awaiting_approval' | 'researching' | 'done';
+
+type RunState = {
+    phase: Phase;
+    mode: 'local' | 'sandbox';
+    prompt: string;
+    plan?: string;
+    sdkSessionId?: string;
+};
+
+// In-memory state (backed by Convex)
+const runs = new Map<string, RunState>();
+
+// Planner prompt - concise planning
+const PLANNER_PROMPT = `You are a research planner. Create a brief plan for the research task.
+
+1. Write a plan to "plan.md" with:
+   - Topic (1 line)
+   - Goal (1 line)
+   - 3-5 search queries to use
+
+2. Say "Ready. Click Approve to start research."
+
+Be concise. Stop after writing the plan.`;
+
+// =============================================================================
+// Run Management
+// =============================================================================
+
 /**
- * Initialize a run
+ * Initialize a new run
  */
-export function initRun(runId: string, prompt: string, mode: 'local' | 'sandbox' = 'local'): void {
-    runStates.set(runId, {
-        phase: 'planning',
-        mode,
-        originalPrompt: prompt,
-    });
+export async function initRun(
+    runId: string,
+    prompt: string,
+    mode: 'local' | 'sandbox' = 'local'
+): Promise<RunState> {
+    // Check for existing session in Convex
+    const existing = await getSession(runId);
+
+    if (existing && existing.phase !== 'done') {
+        // Resume existing session
+        const state: RunState = {
+            phase: existing.phase as Phase,
+            mode: existing.mode as 'local' | 'sandbox',
+            prompt,
+            plan: existing.plan,
+            sdkSessionId: existing.sdkSessionId,
+        };
+        runs.set(runId, state);
+        return state;
+    }
+
+    // Create new run
+    const state: RunState = { phase: 'planning', mode, prompt };
+    runs.set(runId, state);
+    return state;
 }
 
 /**
  * Get run state
  */
 export function getRunState(runId: string): RunState | undefined {
-    return runStates.get(runId);
+    return runs.get(runId);
 }
 
 /**
- * Mark run as approved and store plan
+ * Approve run and transition to research phase
  */
-export function approveRun(runId: string, plan?: string): boolean {
-    const state = runStates.get(runId);
-    if (!state || state.phase !== 'awaiting_approval') {
-        return false;
-    }
+export async function approveRun(runId: string, plan?: string): Promise<boolean> {
+    const state = runs.get(runId);
+    if (!state || state.phase !== 'awaiting_approval') return false;
+
     state.phase = 'researching';
     if (plan) state.plan = plan;
+
+    await updateSessionPhase(runId, 'researching', plan);
     return true;
 }
 
-/**
- * Phase 1: Planning
- */
+// =============================================================================
+// Phase 1: Planning
+// =============================================================================
+
 export async function* runPlanning(runId: string): AsyncGenerator<StreamEvent> {
-    const state = runStates.get(runId);
+    const state = runs.get(runId);
     if (!state) {
         yield { type: 'error', content: 'Run not found' };
         return;
@@ -80,47 +117,74 @@ export async function* runPlanning(runId: string): AsyncGenerator<StreamEvent> {
         return;
     }
 
+    const pendingEvents: StreamEvent[] = [];
+    const hooks = createStreamingHooks((e) => pendingEvents.push(e));
+
     let planContent = '';
+    let capturedSessionId: string | undefined;
 
-    for await (const msg of query({
-        prompt: state.originalPrompt,
-        options: {
-            systemPrompt: PLANNER_PROMPT,
-            allowedTools: ['Write'],
-            maxTurns: 5,
-            model: 'sonnet',
-            cwd: './workspace',
-            includePartialMessages: true,  // Enable real-time streaming
-        }
-    })) {
-        // Handle real-time token streaming
-        if (msg.type === 'stream_event') {
-            const event = msg.event as any;
-            if (event.type === 'content_block_delta' &&
-                event.delta?.type === 'text_delta' &&
-                event.delta?.text) {
-                yield { type: 'text', content: event.delta.text };
+    try {
+        for await (const msg of query({
+            prompt: state.prompt,
+            options: {
+                systemPrompt: PLANNER_PROMPT,
+                allowedTools: ['Write'],
+                maxTurns: 5,
+                model: 'sonnet',
+                cwd: './workspace',
+                includePartialMessages: true,
+                hooks,
+            },
+        })) {
+            // Capture session ID
+            if (msg.type === 'system' && (msg as any).subtype === 'init') {
+                capturedSessionId = (msg as any).session_id;
             }
-            continue;
-        }
 
-        const events = translateMessage(msg);
-        for (const event of events) {
-            // Capture plan content from Write tool
-            if (event.type === 'tool' && event.data) {
-                const toolData = event.data as { name: string; input: { content?: string; file_path?: string } };
-                if (toolData.name === 'Write' && String(toolData.input.file_path || '').includes('plan')) {
-                    planContent = toolData.input.content || '';
+            // Stream tokens
+            if (msg.type === 'stream_event') {
+                const event = (msg as any).event;
+                if (event?.type === 'content_block_delta' && event.delta?.text) {
+                    yield { type: 'text', content: event.delta.text };
                 }
+                continue;
             }
-            yield event;
+
+            // Extract tool calls
+            const events = extractToolEvents(msg);
+            for (const event of events) {
+                if (event.type === 'tool' && event.data) {
+                    const { name, input } = event.data as { name: string; input: { file_path?: string; content?: string } };
+                    if (name === 'Write' && input.file_path?.includes('plan')) {
+                        planContent = input.content || '';
+                    }
+                }
+                yield event;
+            }
+
+            // Flush pending hook events
+            while (pendingEvents.length > 0) {
+                yield pendingEvents.shift()!;
+            }
         }
+    } catch (error) {
+        yield { type: 'error', content: String(error) };
+        return;
     }
 
-    // Store plan and transition to awaiting approval
+    // Update state and persist
     if (planContent) {
         state.plan = planContent;
         state.phase = 'awaiting_approval';
+        state.sdkSessionId = capturedSessionId;
+
+        await upsertSession({
+            threadId: runId,
+            sdkSessionId: capturedSessionId || runId,
+            phase: 'awaiting_approval',
+            plan: planContent,
+            mode: state.mode,
+        });
 
         yield {
             type: 'artifact',
@@ -129,18 +193,19 @@ export async function* runPlanning(runId: string): AsyncGenerator<StreamEvent> {
                 title: 'Research Plan',
                 content: planContent,
                 editable: true,
-            })
+            }),
         };
     }
 
     yield { type: 'done', content: 'awaiting_approval' };
 }
 
-/**
- * Phase 2: Research — Routes to local or sandbox based on mode
- */
+// =============================================================================
+// Phase 2: Research
+// =============================================================================
+
 export async function* runResearch(runId: string): AsyncGenerator<StreamEvent> {
-    const state = runStates.get(runId);
+    const state = runs.get(runId);
     if (!state) {
         yield { type: 'error', content: 'Run not found' };
         return;
@@ -151,36 +216,40 @@ export async function* runResearch(runId: string): AsyncGenerator<StreamEvent> {
         return;
     }
 
-    const task = `Research: ${state.originalPrompt}\n\nPlan:\n${state.plan || 'No plan provided'}`;
-    console.log(`[orchestrator] Running in ${state.mode} mode`);
+    const task = `Research: ${state.prompt}\n\nPlan:\n${state.plan || 'No plan provided'}`;
 
     // Route to appropriate runner
     if (state.mode === 'local') {
         const { runLocal } = await import('./local-runner.js');
-        yield* runLocal(task, runId);  // Pass runId for session isolation
+        yield* runLocal({
+            threadId: runId,
+            task,
+            mode: state.mode,
+            sdkSessionId: state.sdkSessionId,
+        });
     } else {
         const { runSandbox } = await import('./sandbox-runner.js');
         yield* runSandbox(task);
     }
 
     state.phase = 'done';
+    await updateSessionPhase(runId, 'done');
 }
 
-/**
- * Translate SDK message to stream events
- */
-function translateMessage(msg: SDKMessage): StreamEvent[] {
+// =============================================================================
+// Helpers
+// =============================================================================
+
+function extractToolEvents(msg: SDKMessage): StreamEvent[] {
     const events: StreamEvent[] = [];
 
     if (msg.type === 'assistant' && msg.message?.content) {
         for (const block of msg.message.content) {
-            // Skip text blocks - we get these from stream_event now
-            // Only extract tool calls
             if ('name' in block && 'input' in block) {
                 events.push({
                     type: 'tool',
-                    content: block.name,
-                    data: { name: block.name, input: block.input }
+                    content: block.name as string,
+                    data: { name: block.name, input: block.input },
                 });
             }
         }

@@ -1,15 +1,14 @@
 /**
- * Sandbox Runner — E2B Cloud Execution
- * 
- * Runs Claude Agent SDK inside E2B sandbox.
- * Matches local-runner's event streaming pattern.
+ * Sandbox Runner — E2B Cloud Execution with Real-time Streaming
+ *
+ * Uses an async queue to bridge E2B's callback-based stdout
+ * to our generator-based event streaming.
  */
 
 import type { Sandbox } from '@e2b/code-interpreter';
 import { getSandbox, setupSandbox, pause } from '../sandbox/sandbox-manager.js';
 import { RESEARCHER_PROMPT } from '../prompts/researcher.js';
 
-// Explicit paths for file operations
 const FILES_DIR = '/home/user/files';
 const REPORT_PATH = `${FILES_DIR}/report.md`;
 
@@ -19,132 +18,113 @@ export type StreamEvent = {
     data?: unknown;
 };
 
-/**
- * Run research in E2B sandbox
- * Streams events similar to local-runner
- */
-export async function* runSandbox(task: string): AsyncGenerator<StreamEvent> {
-    console.log('\n[sandbox] ========== NEW SANDBOX SESSION ==========');
-    console.log(`[sandbox] Task: ${task.slice(0, 100)}...`);
+// =============================================================================
+// Async Event Queue — Bridges callbacks to async iteration
+// =============================================================================
 
+class EventQueue<T> {
+    private queue: T[] = [];
+    private resolvers: Array<(value: T | null) => void> = [];
+    private closed = false;
+
+    push(item: T): void {
+        if (this.closed) return;
+        if (this.resolvers.length > 0) {
+            const resolve = this.resolvers.shift()!;
+            resolve(item);
+        } else {
+            this.queue.push(item);
+        }
+    }
+
+    close(): void {
+        this.closed = true;
+        for (const resolve of this.resolvers) {
+            resolve(null);
+        }
+        this.resolvers = [];
+    }
+
+    async *[Symbol.asyncIterator](): AsyncGenerator<T> {
+        while (true) {
+            if (this.queue.length > 0) {
+                yield this.queue.shift()!;
+            } else if (this.closed) {
+                return;
+            } else {
+                const item = await new Promise<T | null>((resolve) => {
+                    this.resolvers.push(resolve);
+                });
+                if (item === null) return;
+                yield item;
+            }
+        }
+    }
+}
+
+// =============================================================================
+// Sandbox Runner
+// =============================================================================
+
+export async function* runSandbox(task: string): AsyncGenerator<StreamEvent> {
     yield { type: 'status', content: 'Starting sandbox...' };
-    console.log('[sandbox] Yielded: status -> Starting sandbox...');
 
     let sandbox: Sandbox | null = null;
-
-    // Collect events from stdout to yield after command completes
-    const pendingEvents: StreamEvent[] = [];
+    const eventQueue = new EventQueue<StreamEvent>();
 
     try {
         const result = await getSandbox();
         sandbox = result.sandbox;
 
-        // Setup if needed
         if (result.needsSetup) {
             yield { type: 'status', content: 'Installing SDK (~30s)...' };
-            console.log('[sandbox] Yielded: status -> Installing SDK...');
             await setupSandbox(sandbox);
         }
 
-        // Create files directory
         await sandbox.commands.run(`mkdir -p ${FILES_DIR}`);
-        console.log(`[sandbox] Created ${FILES_DIR}`);
 
-        // Generate and write script
         const script = generateScript(task);
         await sandbox.files.write('/home/user/agent.mjs', script);
 
         yield { type: 'status', content: 'Researching...' };
-        console.log('[sandbox] Yielded: status -> Researching...');
 
-        // Run agent and collect events
-        await sandbox.commands.run('cd /home/user && node agent.mjs', {
+        // Run command in background, streaming events via queue
+        const commandPromise = sandbox.commands.run('cd /home/user && node agent.mjs', {
             timeoutMs: 5 * 60 * 1000,
             onStdout: (line) => {
-                try {
-                    const msg = JSON.parse(line);
-
-                    // Handle real-time token streaming
-                    if (msg.type === 'stream_event') {
-                        const event = msg.event;
-                        if (event?.type === 'content_block_delta' &&
-                            event.delta?.type === 'text_delta' &&
-                            event.delta?.text) {
-                            pendingEvents.push({
-                                type: 'text',
-                                content: event.delta.text
-                            });
-                        }
-                    }
-
-                    if (msg.type === 'assistant' && msg.message?.content) {
-                        for (const block of msg.message.content) {
-                            if ('name' in block && 'input' in block) {
-                                const toolName = block.name as string;
-                                console.log(`[sandbox] Tool: ${toolName}`);
-
-                                // Only queue tool event (not status - would be out of order)
-                                pendingEvents.push({
-                                    type: 'tool',
-                                    content: toolName,
-                                    data: { name: toolName, input: block.input }
-                                });
-                            }
-                        }
-                    }
-                } catch {
-                    if (line.trim()) console.log('[sandbox stdout]', line);
-                }
+                const event = parseStdoutLine(line);
+                if (event) eventQueue.push(event);
             },
             onStderr: (line) => {
                 if (line.trim()) console.error('[sandbox stderr]', line);
-            }
-        });
+            },
+        }).finally(() => eventQueue.close());
 
-        // Yield pending events
-        for (const event of pendingEvents) {
+        // Stream events as they arrive
+        for await (const event of eventQueue) {
             yield event;
-            console.log(`[sandbox] Yielded: ${event.type} -> ${event.content.slice(0, 50)}...`);
         }
 
-        // Read report
-        console.log(`[sandbox] Reading report from ${REPORT_PATH}...`);
-        let report = '';
-        try {
-            report = await sandbox.files.read(REPORT_PATH);
-            console.log(`[sandbox] Report read (${report.length} chars)`);
-        } catch {
-            // Fallback: find report anywhere
-            console.log('[sandbox] Trying to find report.md...');
-            const findResult = await sandbox.commands.run('find /home/user -name "report.md" 2>/dev/null | head -1');
-            const path = findResult.stdout.trim();
-            if (path) {
-                console.log(`[sandbox] Found at: ${path}`);
-                report = await sandbox.files.read(path);
-            }
-        }
+        // Wait for command to fully complete
+        await commandPromise;
 
+        // Read and emit report
+        const report = await readReport(sandbox);
         if (report) {
             yield { type: 'status', content: 'Complete' };
-            console.log('[sandbox] Yielded: status -> Complete');
-
             yield {
                 type: 'artifact',
                 content: JSON.stringify({
                     type: 'report',
                     title: 'Research Report',
                     content: report,
-                })
+                }),
             };
-            console.log('[sandbox] Yielded: artifact');
-
-            // Only emit text if no artifact panel (optional)
-            // yield { type: 'text', content: report };  // Disabled to avoid duplication
         } else {
-            console.error('[sandbox] No report found');
             yield { type: 'status', content: 'No report generated' };
         }
-
+    } catch (error) {
+        yield { type: 'error', content: String(error) };
     } finally {
         if (sandbox) {
             await pause(sandbox.sandboxId);
@@ -152,13 +132,62 @@ export async function* runSandbox(task: string): AsyncGenerator<StreamEvent> {
     }
 
     yield { type: 'done', content: 'complete' };
-    console.log('[sandbox] ========== SESSION COMPLETE ==========\n');
 }
 
-/**
- * Generate agent script with Exa search tool
- * Creates an inline MCP server for Exa search
- */
+// =============================================================================
+// Helpers
+// =============================================================================
+
+function parseStdoutLine(line: string): StreamEvent | null {
+    try {
+        const msg = JSON.parse(line);
+
+        // Real-time token streaming
+        if (msg.type === 'stream_event') {
+            const event = msg.event;
+            if (
+                event?.type === 'content_block_delta' &&
+                event.delta?.type === 'text_delta' &&
+                event.delta?.text
+            ) {
+                return { type: 'text', content: event.delta.text };
+            }
+        }
+
+        // Tool calls from assistant messages
+        if (msg.type === 'assistant' && msg.message?.content) {
+            for (const block of msg.message.content) {
+                if ('name' in block && 'input' in block) {
+                    return {
+                        type: 'tool',
+                        content: block.name as string,
+                        data: { name: block.name, input: block.input },
+                    };
+                }
+            }
+        }
+    } catch {
+        // Non-JSON output, ignore
+    }
+    return null;
+}
+
+async function readReport(sandbox: Sandbox): Promise<string | null> {
+    try {
+        return await sandbox.files.read(REPORT_PATH);
+    } catch {
+        // Fallback: find report anywhere
+        const findResult = await sandbox.commands.run(
+            'find /home/user -name "report.md" 2>/dev/null | head -1'
+        );
+        const path = findResult.stdout.trim();
+        if (path) {
+            return await sandbox.files.read(path);
+        }
+    }
+    return null;
+}
+
 function generateScript(task: string): string {
     const promptWithPath = RESEARCHER_PROMPT.replace(/report\.md/g, REPORT_PATH);
     const exaApiKey = process.env.EXA_API_KEY || '';
@@ -168,14 +197,12 @@ import { query, createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
 import { z } from 'zod';
 import Exa from 'exa-js';
 
-// Initialize Exa client
 const exaApiKey = ${JSON.stringify(exaApiKey)};
 const getExaClient = () => {
     if (!exaApiKey) throw new Error("EXA_API_KEY not set");
     return new Exa(exaApiKey);
 };
 
-// Create Exa search MCP server
 const exaSearchTools = createSdkMcpServer({
     name: "exa-search",
     version: "1.0.0",
@@ -217,7 +244,6 @@ const exaSearchTools = createSdkMcpServer({
     ]
 });
 
-// Run agent
 for await (const msg of query({
     prompt: ${JSON.stringify(task)},
     options: {

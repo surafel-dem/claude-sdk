@@ -1,18 +1,89 @@
 import { httpRouter } from "convex/server";
 import { httpAction } from "./_generated/server";
 import { authComponent, createAuth } from "./auth";
-import { createHttp as createArtifact } from "./artifacts";
 
 const http = httpRouter();
 
 // CORS handling is required for client side frameworks
 authComponent.registerRoutes(http, createAuth, { cors: true });
 
-// Artifact creation endpoint for backend
+// Generic mutation endpoint for all backend calls
+const genericMutation = httpAction(async (ctx, request) => {
+    const body = await request.json();
+    const { path, args } = body;
+
+    if (!path || !args) {
+        return new Response(
+            JSON.stringify({ error: "Missing required fields" }),
+            { status: 400, headers: { "Content-Type": "application/json" } }
+        );
+    }
+
+    try {
+        const result = await ctx.runMutation(path as any, args);
+        return new Response(
+            JSON.stringify({ value: result }),
+            {
+                status: 200,
+                headers: {
+                    "Content-Type": "application/json",
+                    "Access-Control-Allow-Origin": "*"
+                }
+            }
+        );
+    } catch (error) {
+        console.error(`[HTTP] Mutation ${path} failed:`, error);
+        return new Response(
+            JSON.stringify({ error: String(error) }),
+            { status: 500, headers: { "Content-Type": "application/json" } }
+        );
+    }
+});
+
+// Main mutation endpoint for backend
 http.route({
     path: "/api/mutation",
     method: "POST",
-    handler: createArtifact,
+    handler: genericMutation,
+});
+
+// CORS preflight for mutation
+http.route({
+    path: "/api/mutation",
+    method: "OPTIONS",
+    handler: httpAction(async () => {
+        return new Response(null, {
+            status: 204,
+            headers: {
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "POST, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type",
+            },
+        });
+    }),
+});
+
+// Alias for artifact updates (backward compat)
+http.route({
+    path: "/api/artifacts/update",
+    method: "POST",
+    handler: genericMutation,
+});
+
+// CORS preflight for artifacts/update
+http.route({
+    path: "/api/artifacts/update",
+    method: "OPTIONS",
+    handler: httpAction(async () => {
+        return new Response(null, {
+            status: 204,
+            headers: {
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "POST, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type",
+            },
+        });
+    }),
 });
 
 // Get thread history (messages + artifacts) for backend context

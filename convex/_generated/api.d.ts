@@ -11,7 +11,9 @@
 import type * as artifacts from "../artifacts.js";
 import type * as auth from "../auth.js";
 import type * as http from "../http.js";
+import type * as internal_ from "../internal.js";
 import type * as messages from "../messages.js";
+import type * as sessions from "../sessions.js";
 import type * as threads from "../threads.js";
 import type * as users from "../users.js";
 
@@ -25,7 +27,9 @@ declare const fullApi: ApiFromModules<{
   artifacts: typeof artifacts;
   auth: typeof auth;
   http: typeof http;
+  internal: typeof internal_;
   messages: typeof messages;
+  sessions: typeof sessions;
   threads: typeof threads;
   users: typeof users;
 }>;

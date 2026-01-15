@@ -1,151 +1,161 @@
 /**
  * Convex HTTP Client
- * 
- * Simple HTTP client for creating artifacts in Convex from the backend.
+ *
+ * HTTP client for Convex operations: artifacts, sessions, tool calls.
  */
 
-declare const process: { env: Record<string, string | undefined> };
+const CONVEX_SITE_URL = process.env.CONVEX_SITE_URL;
+const CONVEX_CLOUD_URL = process.env.VITE_CONVEX_URL || process.env.CONVEX_URL;
 
-// Check multiple possible env var names
-const CONVEX_SITE_URL = process.env.CONVEX_SITE_URL;  // Already correct format (*.convex.site)
-const CONVEX_CLOUD_URL = process.env.VITE_CONVEX_URL || process.env.CONVEX_URL;  // Cloud URL (*.convex.cloud)
-
-// Use site URL if available, otherwise convert cloud URL to site URL
-const getApiUrl = () => {
-    if (CONVEX_SITE_URL) {
-        return `${CONVEX_SITE_URL}/api/mutation`;
-    }
-    if (CONVEX_CLOUD_URL) {
-        return `${CONVEX_CLOUD_URL.replace('.cloud', '.site')}/api/mutation`;
-    }
+const getBaseUrl = () => {
+    if (CONVEX_SITE_URL) return CONVEX_SITE_URL;
+    if (CONVEX_CLOUD_URL) return CONVEX_CLOUD_URL.replace('.cloud', '.site');
     return null;
 };
 
-const API_URL = getApiUrl();
-console.log('[Convex Client] API URL:', API_URL ? API_URL.slice(0, 40) + '...' : 'NOT SET');
+const BASE_URL = getBaseUrl();
+console.log('[Convex] URL:', BASE_URL ? BASE_URL.slice(0, 40) + '...' : 'NOT SET');
 
-interface ArtifactResult {
-    id: string;
+// Generic mutation helper
+async function mutation<T>(path: string, args: Record<string, unknown>): Promise<T | null> {
+    if (!BASE_URL) return null;
+    try {
+        const response = await fetch(`${BASE_URL}/api/mutation`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path, args }),
+        });
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.error(`[Convex] ${path} failed:`, response.status, errorText);
+            return null;
+        }
+        const result = await response.json();
+        return result.value ?? result;
+    } catch (e) {
+        console.error(`[Convex] ${path} error:`, e);
+        return null;
+    }
 }
 
-/**
- * Create an artifact in Convex via HTTP mutation
- */
+// =============================================================================
+// Artifacts
+// =============================================================================
+
 export async function createArtifact(
     threadId: string,
     type: string,
     title: string,
     content: string
-): Promise<ArtifactResult | null> {
-    if (!API_URL) {
-        console.warn('[Convex] No CONVEX_URL configured, skipping artifact creation');
-        return null;
-    }
-
-    try {
-        const response = await fetch(API_URL, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                path: 'artifacts:create',
-                args: {
-                    threadId,
-                    type,
-                    title,
-                    content,
-                },
-            }),
-        });
-
-        if (!response.ok) {
-            console.error('[Convex] Failed to create artifact:', response.status);
-            return null;
-        }
-
-        const result = await response.json();
-        return { id: result.value || result };
-    } catch (error) {
-        console.error('[Convex] Error creating artifact:', error);
-        return null;
-    }
+): Promise<{ id: string } | null> {
+    const result = await mutation<string>('artifacts:create', { threadId, type, title, content });
+    return result ? { id: result } : null;
 }
 
-/**
- * Update an artifact in Convex
- */
 export async function updateArtifact(
     artifactId: string,
     updates: { content?: string; status?: string }
 ): Promise<boolean> {
-    if (!API_URL) {
-        return false;
-    }
-
+    // Use the dedicated update endpoint
+    if (!BASE_URL) return false;
     try {
-        // Use same API_URL but for update path
-        const updateUrl = API_URL.replace('/api/mutation', '/api/update');
-
-        const response = await fetch(API_URL, {
+        const response = await fetch(`${BASE_URL}/api/artifacts/update`, {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                path: 'artifacts:update',
-                args: {
-                    id: artifactId,
-                    ...updates,
-                },
-            }),
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path: 'artifacts:update', args: { id: artifactId, ...updates } }),
         });
-
-        return response.ok;
-    } catch (error) {
-        console.error('[Convex] Error updating artifact:', error);
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.error(`[Convex] artifacts:update failed:`, response.status, errorText);
+            return false;
+        }
+        return true;
+    } catch (e) {
+        console.error(`[Convex] artifacts:update error:`, e);
         return false;
     }
 }
 
-/**
- * Fetch thread history (messages + artifacts) from Convex
- */
+// =============================================================================
+// Sessions
+// =============================================================================
+
+export interface Session {
+    threadId: string;
+    sdkSessionId: string;
+    phase: string;
+    plan?: string;
+    mode: string;
+}
+
+export async function getSession(threadId: string): Promise<Session | null> {
+    if (!BASE_URL) return null;
+    try {
+        const params = new URLSearchParams();
+        params.set('path', 'sessions:getByThread');
+        params.set('args', JSON.stringify({ threadId }));
+
+        const response = await fetch(`${BASE_URL}/api/query?${params}`);
+        if (!response.ok) return null;
+
+        const result = await response.json();
+        return result.value ?? result;
+    } catch {
+        return null;
+    }
+}
+
+export async function upsertSession(session: Session): Promise<string | null> {
+    return mutation<string>('sessions:upsert', session);
+}
+
+export async function updateSessionPhase(
+    threadId: string,
+    phase: string,
+    plan?: string
+): Promise<boolean> {
+    const result = await mutation('sessions:updatePhase', { threadId, phase, plan });
+    return result !== null;
+}
+
+// =============================================================================
+// Tool Calls (Audit Trail)
+// =============================================================================
+
+export async function logToolCall(
+    threadId: string,
+    agentId: string,
+    agentType: string,
+    toolName: string,
+    input: unknown
+): Promise<boolean> {
+    const result = await mutation('internal:logToolCall', {
+        threadId,
+        agentId,
+        agentType,
+        toolName,
+        input,
+        timestamp: Date.now(),
+    });
+    return result !== null;
+}
+
+// =============================================================================
+// Thread History
+// =============================================================================
+
 export interface ThreadHistory {
     messages: Array<{ role: string; content: string; createdAt: number }>;
     artifacts: Array<{ type: string; title: string; content: string; createdAt: number }>;
 }
 
 export async function getThreadHistory(threadId: string): Promise<ThreadHistory | null> {
-    if (!API_URL) {
-        console.warn('[Convex] No CONVEX_URL configured, cannot fetch history');
-        return null;
-    }
-
+    if (!BASE_URL) return null;
     try {
-        // Use the site URL for query endpoint
-        const historyUrl = API_URL.replace('/api/mutation', '/api/thread-history');
-        const urlWithParams = `${historyUrl}?threadId=${encodeURIComponent(threadId)}`;
-
-        console.log('[Convex] Fetching thread history...');
-
-        const response = await fetch(urlWithParams, {
-            method: 'GET',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-        });
-
-        if (!response.ok) {
-            console.error('[Convex] Failed to fetch history:', response.status);
-            return null;
-        }
-
-        const data = await response.json();
-        console.log(`[Convex] Loaded ${data.messages?.length || 0} messages, ${data.artifacts?.length || 0} artifacts`);
-        return data;
-    } catch (error) {
-        console.error('[Convex] Error fetching thread history:', error);
+        const response = await fetch(`${BASE_URL}/api/thread-history?threadId=${encodeURIComponent(threadId)}`);
+        if (!response.ok) return null;
+        return await response.json();
+    } catch {
         return null;
     }
 }

@@ -50,4 +50,15 @@ export default defineSchema({
         input: v.any(),
         timestamp: v.number(),
     }).index("by_thread", ["threadId"]),
+
+    // SDK session persistence for conversation resumption
+    sessions: defineTable({
+        threadId: v.string(),
+        sdkSessionId: v.string(),
+        phase: v.string(),
+        plan: v.optional(v.string()),
+        mode: v.string(),
+        createdAt: v.number(),
+        updatedAt: v.number(),
+    }).index("by_thread", ["threadId"]),
 });

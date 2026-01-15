@@ -1,15 +1,16 @@
 /**
- * Local Runner — Direct SDK Execution
- * 
- * Runs Claude Agent SDK directly on the backend.
- * Uses session-based files for isolation.
- * Detailed logging for debugging.
+ * Local Runner — Direct SDK Execution with Hooks
+ *
+ * Runs Claude Agent SDK locally with full hook support.
+ * Captures SDK session ID for resumption.
  */
 
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'fs';
 import { RESEARCHER_PROMPT } from '../prompts/researcher.js';
 import { exaSearchTools } from '../tools/exa-search.js';
+import { createStreamingHooks } from './hooks.js';
+import { upsertSession, logToolCall } from '../lib/convex.js';
 
 const WORKSPACE = './workspace';
 
@@ -19,173 +20,171 @@ export type StreamEvent = {
     data?: unknown;
 };
 
+type RunOptions = {
+    threadId: string;
+    task: string;
+    mode: 'local' | 'sandbox';
+    sdkSessionId?: string; // For resumption
+};
+
 /**
- * Run research locally using SDK
- * Each run uses a unique session directory
+ * Run research locally with hooks and session persistence
  */
-export async function* runLocal(task: string, sessionId?: string): AsyncGenerator<StreamEvent> {
-    const session = sessionId || `session_${Date.now()}`;
-    const sessionDir = `${WORKSPACE}/${session}`;
+export async function* runLocal(options: RunOptions): AsyncGenerator<StreamEvent> {
+    const { threadId, task, mode } = options;
+    const sessionDir = `${WORKSPACE}/${threadId}`;
     const reportPath = `${sessionDir}/report.md`;
 
     mkdirSync(sessionDir, { recursive: true });
-    console.log(`\n[local] ========== NEW SESSION: ${session} ==========`);
-    console.log(`[local] Session dir: ${sessionDir}`);
-    console.log(`[local] Task: ${task.slice(0, 100)}...`);
+
+    // Collect events to yield (hooks can't yield directly)
+    const pendingEvents: StreamEvent[] = [];
+    const emit = (event: StreamEvent) => pendingEvents.push(event);
+
+    // Create hooks with event emitter
+    const hooks = createStreamingHooks(emit);
+
+    // Track tool calls to Convex
+    const trackToolCall = (toolName: string, input: unknown) => {
+        logToolCall(threadId, threadId, 'researcher', toolName, input).catch(() => {});
+    };
 
     yield { type: 'status', content: 'Starting research...' };
-    console.log('[local] Yielded: status -> Starting research...');
 
     let reportContent = '';
-    let eventCount = 0;
+    let capturedSessionId: string | undefined;
 
-    // Update prompt to use session-specific path
-    const sessionPrompt = RESEARCHER_PROMPT.replace(
-        'report.md',
-        reportPath
-    );
+    // Build prompt with session-specific path
+    const sessionPrompt = RESEARCHER_PROMPT.replace('report.md', reportPath);
+
+    // Streaming input generator (required for MCP)
+    async function* generatePrompt() {
+        yield {
+            type: 'user' as const,
+            message: { role: 'user' as const, content: task },
+        };
+    }
 
     try {
-        console.log('[local] ===== STARTING SDK QUERY =====');
-
-        // MCP servers require streaming input mode (async generator)
-        async function* generatePrompt() {
-            yield {
-                type: 'user' as const,
-                message: {
-                    role: 'user' as const,
-                    content: task
-                }
-            };
-        }
+        console.log(`[local-runner] Starting research for thread: ${threadId}`);
+        console.log(`[local-runner] Mode: ${mode}, SessionDir: ${sessionDir}`);
+        console.log(`[local-runner] Task length: ${task.length} chars`);
 
         for await (const msg of query({
-            prompt: generatePrompt() as any,  // Use async generator for MCP support
+            prompt: generatePrompt() as AsyncIterable<any>,
             options: {
                 systemPrompt: sessionPrompt,
-                mcpServers: {
-                    "exa-search": exaSearchTools
-                },
+                mcpServers: { 'exa-search': exaSearchTools },
                 allowedTools: [
                     'mcp__exa-search__search',
                     'mcp__exa-search__get_contents',
                     'Write',
-                    'Read'
+                    'Read',
                 ],
                 maxTurns: 15,
                 cwd: sessionDir,
                 permissionMode: 'acceptEdits',
-                includePartialMessages: true,  // Enable real-time streaming
-            }
+                includePartialMessages: true,
+                hooks,
+            },
         })) {
-            // Log all message types for debugging
-            console.log(`[local] SDK msg.type: ${msg.type}`);
+            // Capture SDK session ID on init
+            if (msg.type === 'system' && (msg as any).subtype === 'init') {
+                capturedSessionId = (msg as any).session_id;
+                if (capturedSessionId) {
+                    await upsertSession({
+                        threadId,
+                        sdkSessionId: capturedSessionId,
+                        phase: 'researching',
+                        mode,
+                    });
+                }
+            }
 
-            // Handle real-time token streaming
+            // Real-time token streaming
             if (msg.type === 'stream_event') {
                 const event = (msg as any).event;
-                if (event.type === 'content_block_delta' &&
+                if (
+                    event?.type === 'content_block_delta' &&
                     event.delta?.type === 'text_delta' &&
-                    event.delta?.text) {
+                    event.delta?.text
+                ) {
                     yield { type: 'text', content: event.delta.text };
                 }
                 continue;
             }
 
+            // Process assistant messages for tool calls
             if (msg.type === 'assistant' && msg.message?.content) {
                 for (const block of msg.message.content) {
-                    // Handle tool calls
                     if ('name' in block && 'input' in block) {
                         const toolName = block.name as string;
-                        eventCount++;
-                        console.log(`[local] Event #${eventCount}: Tool -> ${toolName}`);
+                        const input = block.input as Record<string, unknown>;
+
+                        // Track to Convex
+                        trackToolCall(toolName, input);
 
                         // Emit status based on tool
-                        let statusMsg = '';
-                        if (toolName === 'WebSearch') {
-                            statusMsg = 'Searching the web...';
-                        } else if (toolName === 'WebFetch') {
-                            statusMsg = 'Reading webpage...';
-                        } else if (toolName === 'Write') {
-                            statusMsg = 'Writing report...';
-                            // Capture report content
-                            const input = block.input as { content?: string; file_path?: string };
-                            if (input.content) {
-                                reportContent = input.content;
-                                console.log(`[local] Captured report content (${reportContent.length} chars)`);
-                            }
-                        } else if (toolName === 'Task') {
-                            statusMsg = 'Running sub-task...';
-                        } else if (toolName === 'Read') {
-                            statusMsg = 'Reading file...';
-                        } else {
-                            statusMsg = `Running ${toolName}...`;
+                        const statusMap: Record<string, string> = {
+                            'mcp__exa-search__search': 'Searching...',
+                            'mcp__exa-search__get_contents': 'Reading sources...',
+                            Write: 'Writing report...',
+                            Read: 'Reading file...',
+                        };
+                        yield { type: 'status', content: statusMap[toolName] || `Running ${toolName}...` };
+
+                        // Capture report content from Write
+                        if (toolName === 'Write' && input.content) {
+                            reportContent = input.content as string;
                         }
 
-                        yield { type: 'status', content: statusMsg };
-                        console.log(`[local] Yielded: status -> ${statusMsg}`);
-
-                        // Emit tool event
+                        // Yield tool event
                         yield {
                             type: 'tool',
                             content: toolName,
-                            data: { name: toolName, input: block.input }
+                            data: { name: toolName, input },
                         };
-                        console.log(`[local] Yielded: tool -> ${toolName}`);
                     }
-
-                    // Skip text blocks - we get these from stream_event now
                 }
+            }
+
+            // Yield any pending hook events
+            while (pendingEvents.length > 0) {
+                yield pendingEvents.shift()!;
             }
         }
     } catch (error) {
-        console.error('[local] SDK Error:', error);
-        yield { type: 'error', content: String(error) };
+        console.error(`[local-runner] Error:`, error);
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        yield { type: 'error', content: errorMessage };
+        return;
     }
 
-    console.log(`[local] SDK loop complete. Events: ${eventCount}, Report captured: ${reportContent.length > 0}`);
-
-    // Handle report
+    // Handle report output
     if (reportContent) {
-        // Save to session file
         writeFileSync(reportPath, reportContent);
-        console.log(`[local] Report saved to: ${reportPath}`);
-
         yield { type: 'status', content: 'Complete' };
-        console.log('[local] Yielded: status -> Complete');
-
-        // Create artifact
         yield {
             type: 'artifact',
             content: JSON.stringify({
                 type: 'report',
                 title: 'Research Report',
                 content: reportContent,
-            })
+            }),
         };
-        console.log('[local] Yielded: artifact');
-
-        // Report is in artifact - no need to emit as text again
+    } else if (existsSync(reportPath)) {
+        const fileContent = readFileSync(reportPath, 'utf-8');
+        yield {
+            type: 'artifact',
+            content: JSON.stringify({
+                type: 'report',
+                title: 'Research Report',
+                content: fileContent,
+            }),
+        };
     } else {
-        // Try to read from file if agent wrote directly
-        if (existsSync(reportPath)) {
-            const fileContent = readFileSync(reportPath, 'utf-8');
-            console.log(`[local] Found report file (${fileContent.length} chars)`);
-            yield {
-                type: 'artifact',
-                content: JSON.stringify({
-                    type: 'report',
-                    title: 'Research Report',
-                    content: fileContent,
-                })
-            };
-            // Report is in artifact - no need to emit as text again
-        } else {
-            console.log('[local] No report generated');
-            yield { type: 'status', content: 'No report generated' };
-        }
+        yield { type: 'status', content: 'No report generated' };
     }
 
     yield { type: 'done', content: 'complete' };
-    console.log('[local] ========== SESSION COMPLETE ==========\n');
 }
