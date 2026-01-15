@@ -77,6 +77,10 @@ interface MessagePart {
   content: string;
   activities?: Activity[];
   artifact?: Artifact;
+  // Timing info for ThinkingBlock
+  startTime?: number;
+  endTime?: number;
+  duration?: number; // in seconds
 }
 
 interface Message {
@@ -280,8 +284,17 @@ function Sidebar({
   );
 }
 
-// === Thinking Block (Collapsible like Claude Code) ===
-function ThinkingBlock({ activities, isStreaming }: { activities: Activity[]; isStreaming?: boolean }) {
+// === Thinking Block (Collapsible like Cursor.ai) ===
+// Shows real-time status during streaming, then collapses to "Completed in Xs" when done
+function ThinkingBlock({
+  activities,
+  isStreaming,
+  duration
+}: {
+  activities: Activity[];
+  isStreaming?: boolean;
+  duration?: number; // Duration in seconds when completed
+}) {
   const [isExpanded, setIsExpanded] = useState(false);
 
   if (activities.length === 0) return null;
@@ -338,8 +351,23 @@ function ThinkingBlock({ activities, isStreaming }: { activities: Activity[]; is
     return null;
   };
 
-  // Get summary status
+  // Format duration nicely
+  const formatDuration = (seconds: number): string => {
+    if (seconds < 1) return '<1s';
+    if (seconds < 60) return `${seconds.toFixed(1)}s`;
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.round(seconds % 60);
+    return `${mins}m ${secs}s`;
+  };
+
+  // Get summary status - shows live status during streaming, completion info when done
   const getSummaryStatus = (): string => {
+    // When completed, show duration
+    if (!isStreaming && duration !== undefined) {
+      return `Completed in ${formatDuration(duration)}`;
+    }
+
+    // During streaming: show current action
     const steps = activities.filter(a => a.type === 'step' || a.type === 'status');
     if (steps.length > 0) return steps[steps.length - 1].name;
 
@@ -498,19 +526,26 @@ function cleanInternalMarkers(text: string): string {
 }
 
 // === Message Content ===
+// Clean render with proper order: ThinkingBlock → Text → Artifacts
+// Text is hidden during streaming to avoid visual clutter
 function MessageContent({ parts, isStreaming, onArtifactClick }: {
   parts: MessagePart[];
   isStreaming?: boolean;
   onArtifactClick?: (artifact: Artifact) => void;
 }) {
-  // Collect all activities and separate text/artifacts
+  // Collect all content from parts, preserving timing from activity part
   const allActivities: Activity[] = [];
   const textParts: string[] = [];
   const artifacts: Artifact[] = [];
+  let duration: number | undefined;
 
   for (const part of parts) {
     if (part.type === 'activity' && part.activities) {
       allActivities.push(...part.activities);
+      // Extract duration from activity part if completed
+      if (part.duration !== undefined) {
+        duration = part.duration;
+      }
     } else if (part.type === 'artifact' && part.artifact) {
       artifacts.push(part.artifact);
     } else if (part.type === 'text') {
@@ -529,26 +564,30 @@ function MessageContent({ parts, isStreaming, onArtifactClick }: {
     return null;
   }
 
-  // During streaming with activities: ONLY show ThinkingBlock, hide text until done
-  // This prevents the "congested" look where text appears above/with status updates
-  const shouldHideTextDuringStream = isStreaming && allActivities.length > 0;
+  // During streaming: hide text to keep UI clean (shows in ThinkingBlock instead)
+  // After completion: show text summary below ThinkingBlock
+  const shouldHideText = isStreaming && allActivities.length > 0;
 
-  // Render order: Thinking block → Text summary → Artifacts
+  // Clean render order: ThinkingBlock → Text summary → Artifacts
   return (
     <div className="message-content">
-      {/* 1. Collapsible thinking block (shows what agent is doing) */}
+      {/* 1. ThinkingBlock: Shows live status during streaming, "Completed in Xs" when done */}
       {allActivities.length > 0 && (
-        <ThinkingBlock activities={allActivities} isStreaming={isStreaming} />
+        <ThinkingBlock
+          activities={allActivities}
+          isStreaming={isStreaming}
+          duration={duration}
+        />
       )}
 
-      {/* 2. Text summary (only show when not actively streaming with activities) */}
-      {combinedText && !shouldHideTextDuringStream && (
+      {/* 2. Text summary: Only shown after streaming completes */}
+      {combinedText && !shouldHideText && (
         <div className="markdown">
           <ReactMarkdown remarkPlugins={[remarkGfm]}>{combinedText}</ReactMarkdown>
         </div>
       )}
 
-      {/* 3. Artifact cards (deliverables like reports) */}
+      {/* 3. Artifact cards: Clickable cards for plans/reports */}
       {artifacts.map((artifact, i) => (
         <ArtifactCard key={i} artifact={artifact} onClick={() => onArtifactClick?.(artifact)} />
       ))}
@@ -572,131 +611,95 @@ function MainApp() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const currentRunIdRef = useRef<string | null>(null);  // Track current run for continuation
 
-  // Sync lock: prevents Convex from overwriting streaming state
-  const [syncLocked, setSyncLocked] = useState(false);
-
-  // Store artifacts separately so Convex sync doesn't kill them
-  const artifactsRef = useRef<Map<number, Artifact>>(new Map());
-
+  // Convex mutations for persistence (fire-and-forget, don't affect UI)
   const createThread = useMutation(api.threads.create);
   const sendMessage = useMutation(api.messages.send);
   const updateArtifact = useMutation(api.artifacts.update);
-  const threadMessages = useQuery(
-    api.messages.list,
-    activeThreadId ? { threadId: activeThreadId } : "skip"
-  );
 
-  // Query persisted artifacts for the thread
-  const threadArtifacts = useQuery(
-    api.artifacts.listByThread,
-    activeThreadId ? { threadId: activeThreadId } : "skip"
-  );
+  // Load thread history from Convex - only used for initial load, not real-time sync
+  const loadThreadHistory = async (threadId: Id<"threads">) => {
+    try {
+      // Fetch messages and artifacts via Convex HTTP endpoint
+      const [messagesRes, artifactsRes] = await Promise.all([
+        fetch(`${import.meta.env.VITE_CONVEX_URL?.replace('.cloud', '.site') || 'https://animated-wallaby-539.convex.site'}/api/query?path=messages:list&args=${encodeURIComponent(JSON.stringify({ threadId }))}`),
+        fetch(`${import.meta.env.VITE_CONVEX_URL?.replace('.cloud', '.site') || 'https://animated-wallaby-539.convex.site'}/api/query?path=artifacts:listByThread&args=${encodeURIComponent(JSON.stringify({ threadId }))}`)
+      ]);
 
-  // Load messages when thread changes - BUT respect sync lock!
-  // This prevents Convex real-time updates from overwriting streaming artifacts
-  useEffect(() => {
-    // Don't sync while sync is locked (streaming in progress)
-    if (syncLocked) {
-      console.log('[Sync] Skipping sync - locked');
-      return;
-    }
+      const messagesData = await messagesRes.json();
+      const artifactsData = await artifactsRes.json();
 
-    console.log('[Sync] Running sync effect', {
-      threadMessages: threadMessages?.length || 0,
-      threadArtifacts: threadArtifacts?.length || 0,
-      localArtifacts: artifactsRef.current.size
-    });
+      const threadMessages = messagesData.value || [];
+      const threadArtifacts = artifactsData.value || [];
 
-    if (threadMessages) {
-      // Debug: Log all artifacts from Convex
-      if (threadArtifacts) {
-        console.log('[Sync] Artifacts from Convex:', threadArtifacts.map((a: any) => ({
-          type: a.type,
-          title: a.title,
-          createdAt: a.createdAt,
-          id: a._id
-        })));
+      console.log('[Load] Thread history:', { messages: threadMessages.length, artifacts: threadArtifacts.length });
+
+      if (threadMessages.length === 0) {
+        setMessages([]);
+        return;
       }
 
-      // Track which artifacts have been assigned to prevent duplicates
+      // Track which artifacts have been assigned
       const usedArtifactIds = new Set<string>();
 
-      // When syncing from Convex, merge in persisted artifacts
       const loadedMessages: Message[] = threadMessages.map((msg: { role: string; content: string; createdAt: number }, index: number) => {
-        // Hide approval messages completely from display
         let content = msg.content;
         if (content.startsWith('APPROVED:')) {
-          content = ''; // Hide the internal approval message
+          content = '';
         }
 
-        const parts: MessagePart[] = [{ type: 'text', content }];
+        const parts: MessagePart[] = [];
 
-        // Only attach artifacts to assistant messages (not user messages)
-        if (msg.role === 'assistant') {
-          // First check local ref (during streaming), then check Convex persisted artifacts
-          const localArtifact = artifactsRef.current.get(index);
-          if (localArtifact) {
-            console.log(`[Sync] Msg ${index}: Using local artifact`, localArtifact.type);
-            parts.push({ type: 'artifact', content: '', artifact: localArtifact });
-          } else if (threadArtifacts) {
-            // Find artifact created around same time as this message (within 2 minutes)
-            // Use filter + find to avoid matching same artifact to multiple messages
-            console.log(`[Sync] Msg ${index}: Looking for artifact, msg.createdAt=${msg.createdAt}`);
+        if (content) {
+          parts.push({ type: 'text', content });
+        }
 
-            const persistedArtifact = threadArtifacts.find((a: any) => {
-              // Skip already-used artifacts
-              if (usedArtifactIds.has(a._id)) return false;
-              const match = a.createdAt >= msg.createdAt - 5000 && a.createdAt <= msg.createdAt + 120000;
-              console.log(`  Checking artifact ${a.type}: createdAt=${a.createdAt}, match=${match}`);
-              return match;
+        // Attach artifacts to assistant messages
+        if (msg.role === 'assistant' && threadArtifacts.length > 0) {
+          const persistedArtifact = threadArtifacts.find((a: any) => {
+            if (usedArtifactIds.has(a._id)) return false;
+            return a.createdAt >= msg.createdAt - 5000 && a.createdAt <= msg.createdAt + 120000;
+          });
+
+          if (persistedArtifact) {
+            usedArtifactIds.add(persistedArtifact._id);
+            const isEditable = persistedArtifact.type === 'plan' && persistedArtifact.status === 'draft';
+            parts.push({
+              type: 'artifact',
+              content: '',
+              artifact: {
+                id: persistedArtifact._id,
+                type: persistedArtifact.type as 'plan' | 'report',
+                title: persistedArtifact.title,
+                content: persistedArtifact.content,
+                editable: isEditable
+              }
             });
-
-            if (persistedArtifact) {
-              usedArtifactIds.add(persistedArtifact._id);  // Mark as used
-              console.log(`[Sync] Msg ${index}: Found matching artifact`, persistedArtifact.type);
-              // Set editable based on status - if status is 'draft', it's waiting for approval
-              const isEditable = persistedArtifact.type === 'plan' && persistedArtifact.status === 'draft';
-              parts.push({
-                type: 'artifact',
-                content: '',
-                artifact: {
-                  id: persistedArtifact._id,
-                  type: persistedArtifact.type as 'plan' | 'report',
-                  title: persistedArtifact.title,
-                  content: persistedArtifact.content,
-                  editable: isEditable
-                }
-              });
-            } else {
-              console.log(`[Sync] Msg ${index}: No matching artifact found`);
-            }
           }
         }
 
-        return {
-          role: msg.role as 'user' | 'assistant',
-          parts
-        };
+        return { role: msg.role as 'user' | 'assistant', parts };
       });
 
-      console.log('[Sync] Setting messages, total:', loadedMessages.length);
       setMessages(loadedMessages);
-    } else {
+    } catch (error) {
+      console.error('[Load] Failed to load thread history:', error);
       setMessages([]);
-      artifactsRef.current.clear();  // Clear artifacts when thread is cleared
     }
-  }, [threadMessages, threadArtifacts, syncLocked]);
+  };
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, currentParts]);
 
-  // Sync threadId from URL on mount/URL change
+  // Load thread history when URL changes (switching threads)
   useEffect(() => {
     if (urlThreadId && urlThreadId !== activeThreadId) {
-      setActiveThreadId(urlThreadId as Id<"threads">);
+      const threadId = urlThreadId as Id<"threads">;
+      setActiveThreadId(threadId);
       setCurrentParts([]);
       setActiveArtifact(null);
+      // Load history from Convex (one-time fetch, not real-time)
+      loadThreadHistory(threadId);
     }
   }, [urlThreadId]);
 
@@ -712,6 +715,8 @@ function MainApp() {
     setCurrentParts([]);
     setActiveArtifact(null);
     navigate(`/chat/${threadId}`);
+    // Load history from Convex (one-time fetch)
+    loadThreadHistory(threadId);
   };
 
   const handleTextareaChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -739,141 +744,181 @@ function MainApp() {
       navigate(`/chat/${threadId}`);
     }
 
-    // Show user message IMMEDIATELY (don't wait for Convex)
+    // Show user message IMMEDIATELY
     setMessages(prev => [...prev, { role: 'user', parts: [{ type: 'text', content: userMessage }] }]);
     setIsLoading(true);
     setCurrentParts([]);
-    setSyncLocked(true);  // Lock sync during streaming
 
-    // Save user message to Convex in background (non-blocking)
+    // Save user message to Convex in background (fire-and-forget)
     sendMessage({ threadId, role: 'user', content: userMessage });
 
     try {
-      // Include credentials for auth cookie
       const chatResponse = await fetch('http://localhost:3001/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: userMessage, threadId, mode: executionMode }),
-        credentials: 'include', // Send auth cookies
+        credentials: 'include',
       });
 
       const data = await chatResponse.json();
-      currentRunIdRef.current = data.runId;  // Store runId for continuation
+      currentRunIdRef.current = data.runId;
       const eventSource = new EventSource(`http://localhost:3001/api/stream/${data.runId}`);
 
-      // Use single parts for each type to maintain proper order
-      let activityPart: MessagePart = { type: 'activity', content: '', activities: [] };
-      let textContent = '';
-      let artifactPart: MessagePart | null = null;
-      let fullResponse = '';
-
-      // Helper to update currentParts with proper order
-      const updateStreamParts = () => {
-        const newParts: MessagePart[] = [];
-        // 1. Activity (ThinkingBlock) first
-        if (activityPart.activities && activityPart.activities.length > 0) {
-          newParts.push({ ...activityPart, activities: [...activityPart.activities] });
-        }
-        // 2. Text (hidden during streaming if activities exist)
-        if (textContent) {
-          newParts.push({ type: 'text', content: textContent });
-        }
-        // 3. Artifact last
-        if (artifactPart) {
-          newParts.push(artifactPart);
-        }
-        setCurrentParts(newParts);
+      // ========== CLEAN STREAM STATE ==========
+      // Single source of truth for all streaming data
+      const streamState: StreamState = {
+        startTime: Date.now(),
+        activities: [],
+        textContent: '',
+        artifact: null,
       };
 
+      // Helper to build and update currentParts from streamState
+      const updateUI = () => {
+        const parts: MessagePart[] = [];
+
+        // 1. Activity part (ThinkingBlock) - always first
+        if (streamState.activities.length > 0) {
+          parts.push({
+            type: 'activity',
+            content: '',
+            activities: [...streamState.activities],
+            startTime: streamState.startTime,
+          });
+        }
+
+        // 2. Text part (hidden during streaming by MessageContent)
+        if (streamState.textContent) {
+          parts.push({ type: 'text', content: streamState.textContent });
+        }
+
+        // 3. Artifact part - always last
+        if (streamState.artifact) {
+          parts.push({ type: 'artifact', content: '', artifact: streamState.artifact });
+        }
+
+        setCurrentParts(parts);
+      };
+
+      // ========== EVENT HANDLERS ==========
+
       eventSource.addEventListener('text', (event) => {
-        fullResponse += event.data;
-        textContent += event.data;
-        updateStreamParts();
+        streamState.textContent += event.data;
+        updateUI();
       });
 
       eventSource.addEventListener('tool', (event) => {
         try {
-          const toolData = JSON.parse(event.data);
-          const isSearch = toolData.name?.includes('search') || toolData.name === 'WebSearch' || toolData.name === 'WebFetch';
-          activityPart.activities = [...(activityPart.activities || []), {
+          // Backend may send JSON object or plain string
+          let toolName: string;
+          let toolData: Record<string, unknown> = {};
+
+          try {
+            const parsed = JSON.parse(event.data);
+            toolName = parsed.name || event.data;
+            toolData = parsed;
+          } catch {
+            // Plain string tool name
+            toolName = event.data;
+          }
+
+          const isSearch = toolName?.includes('search') || toolName === 'WebSearch' || toolName === 'WebFetch';
+          streamState.activities.push({
             type: isSearch ? 'search' : 'tool',
-            name: toolData.name,
-            detail: getToolDetail(toolData),
+            name: toolName,
+            detail: getToolDetail({ name: toolName, ...toolData }),
             data: toolData,
-          }];
-          updateStreamParts();
-        } catch { /* ignore */ }
+            timestamp: Date.now(),
+          });
+          updateUI();
+        } catch (e) {
+          console.error('[tool event error]', e, event.data);
+        }
       });
 
       eventSource.addEventListener('phase', (event) => {
-        activityPart.activities = [...(activityPart.activities || []), { type: 'status', name: event.data }];
-        updateStreamParts();
+        streamState.activities.push({
+          type: 'status',
+          name: event.data,
+          timestamp: Date.now(),
+        });
+        updateUI();
       });
 
       eventSource.addEventListener('status', (event) => {
-        // Replace last step status instead of accumulating
-        const activities = activityPart.activities || [];
-        const lastIdx = activities.findIndex(a => a.type === 'step');
-        if (lastIdx >= 0) {
-          activities[lastIdx] = { type: 'step', name: event.data };
-          activityPart.activities = [...activities];
+        // Replace existing step status or add new one
+        const stepIdx = streamState.activities.findIndex(a => a.type === 'step');
+        if (stepIdx >= 0) {
+          streamState.activities[stepIdx] = { type: 'step', name: event.data, timestamp: Date.now() };
         } else {
-          activityPart.activities = [...activities, { type: 'step', name: event.data }];
+          streamState.activities.push({ type: 'step', name: event.data, timestamp: Date.now() });
         }
-        updateStreamParts();
+        updateUI();
       });
 
       eventSource.addEventListener('artifact', (event) => {
+        console.log('[artifact event]', event.data);
         try {
           const artifactData = parseArtifact(JSON.parse(event.data));
-          artifactPart = { type: 'artifact', content: '', artifact: artifactData };
-          updateStreamParts();
+          console.log('[artifact parsed]', artifactData);
+          streamState.artifact = artifactData;
+          updateUI();
 
-          // Auto-open artifact panel for plans and reports
+          // Auto-open artifact panel
           setActiveArtifact(artifactData);
-
-          // Save artifact to ref so Convex sync doesn't lose it
-          artifactsRef.current.set(messages.length, artifactData);
-        } catch { /* ignore */ }
+        } catch (e) {
+          console.error('[artifact parse error]', e, event.data);
+        }
       });
 
       eventSource.addEventListener('done', async () => {
         eventSource.close();
 
-        // Build final parts with proper order
+        // Calculate duration
+        streamState.endTime = Date.now();
+        const duration = (streamState.endTime - streamState.startTime) / 1000;
+
+        // Build final parts with duration
         const finalParts: MessagePart[] = [];
-        if (activityPart.activities && activityPart.activities.length > 0) {
-          finalParts.push(activityPart);
-        }
-        if (textContent) {
-          finalParts.push({ type: 'text', content: textContent });
-        }
-        if (artifactPart) {
-          finalParts.push(artifactPart);
+
+        if (streamState.activities.length > 0) {
+          finalParts.push({
+            type: 'activity',
+            content: '',
+            activities: streamState.activities,
+            startTime: streamState.startTime,
+            endTime: streamState.endTime,
+            duration,
+          });
         }
 
-        // Save assistant message to Convex
-        if (fullResponse && threadId) {
-          await sendMessage({ threadId, role: 'assistant', content: fullResponse });
+        if (streamState.textContent) {
+          finalParts.push({ type: 'text', content: streamState.textContent });
+        }
+
+        if (streamState.artifact) {
+          finalParts.push({ type: 'artifact', content: '', artifact: streamState.artifact });
+        }
+
+        // Save to Convex in background (fire-and-forget)
+        if (streamState.textContent && threadId) {
+          sendMessage({ threadId, role: 'assistant', content: streamState.textContent });
         }
 
         setMessages(prev => [...prev, { role: 'assistant', parts: finalParts }]);
         setCurrentParts([]);
         setIsLoading(false);
-        // Unlock sync after delay to let Convex propagate
-        setTimeout(() => setSyncLocked(false), 2000);
       });
 
       eventSource.addEventListener('error', () => {
         eventSource.close();
         setCurrentParts([]);
         setIsLoading(false);
-        setTimeout(() => setSyncLocked(false), 1000);
       });
+
     } catch (error) {
       console.error('Error:', error);
       setIsLoading(false);
-      setSyncLocked(false);
     }
   };
 
@@ -901,7 +946,6 @@ function MainApp() {
     const planContent = activeArtifact.content;
     setActiveArtifact(null);
     setIsLoading(true);
-    setSyncLocked(true);
 
     // Update the artifact in messages to show as approved
     setMessages(prev => prev.map(msg => ({
@@ -920,7 +964,6 @@ function MainApp() {
     }]);
 
     try {
-      // POST to /api/continue - response IS the SSE stream
       const res = await fetch(`http://localhost:3001/api/continue/${currentRunIdRef.current}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -931,31 +974,42 @@ function MainApp() {
         throw new Error('Failed to start research');
       }
 
-      // Read SSE from POST response body
-      // Use a single activity part that accumulates all activities
-      let activityPart: MessagePart = { type: 'activity', content: '', activities: [] };
-      let textPart: MessagePart | null = null;
-      let artifactPart: MessagePart | null = null;
-      let fullResponse = '';
-
-      // Helper to update currentParts with proper order
-      const updateParts = () => {
-        const newParts: MessagePart[] = [];
-        // Always add activity part first (ThinkingBlock)
-        if (activityPart.activities && activityPart.activities.length > 0) {
-          newParts.push({ ...activityPart, activities: [...activityPart.activities] });
-        }
-        // Then text (will be hidden during streaming by MessageContent)
-        if (textPart) {
-          newParts.push(textPart);
-        }
-        // Finally artifact
-        if (artifactPart) {
-          newParts.push(artifactPart);
-        }
-        setCurrentParts(newParts);
+      // ========== CLEAN STREAM STATE ==========
+      const streamState: StreamState = {
+        startTime: Date.now(),
+        activities: [],
+        textContent: '',
+        artifact: null,
       };
 
+      // Helper to build and update currentParts from streamState
+      const updateUI = () => {
+        const parts: MessagePart[] = [];
+
+        // 1. Activity part (ThinkingBlock) - always first
+        if (streamState.activities.length > 0) {
+          parts.push({
+            type: 'activity',
+            content: '',
+            activities: [...streamState.activities],
+            startTime: streamState.startTime,
+          });
+        }
+
+        // 2. Text part (hidden during streaming)
+        if (streamState.textContent) {
+          parts.push({ type: 'text', content: streamState.textContent });
+        }
+
+        // 3. Artifact part - always last
+        if (streamState.artifact) {
+          parts.push({ type: 'artifact', content: '', artifact: streamState.artifact });
+        }
+
+        setCurrentParts(parts);
+      };
+
+      // ========== SSE PARSING ==========
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
@@ -968,58 +1022,53 @@ function MainApp() {
         const lines = buffer.split('\n');
         buffer = lines.pop() || '';
 
-        for (const line of lines) {
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i];
           if (line.startsWith('event:')) {
             const eventType = line.slice(6).trim();
-            const dataLine = lines[lines.indexOf(line) + 1];
+            const dataLine = lines[i + 1];
             const data = dataLine?.startsWith('data:') ? dataLine.slice(5).trim() : '';
 
             switch (eventType) {
               case 'text':
-                fullResponse += data;
-                // Accumulate text into single part
-                if (textPart) {
-                  textPart = { type: 'text', content: textPart.content + data };
-                } else {
-                  textPart = { type: 'text', content: data };
-                }
-                updateParts();
+                streamState.textContent += data;
+                updateUI();
                 break;
 
               case 'status':
               case 'phase':
-                // Add to single activity part (don't create new parts)
-                activityPart.activities = [...(activityPart.activities || []), { type: 'step', name: data }];
-                updateParts();
+                // Replace existing step or add new one
+                const stepIdx = streamState.activities.findIndex(a => a.type === 'step');
+                if (stepIdx >= 0) {
+                  streamState.activities[stepIdx] = { type: 'step', name: data, timestamp: Date.now() };
+                } else {
+                  streamState.activities.push({ type: 'step', name: data, timestamp: Date.now() });
+                }
+                updateUI();
                 break;
 
               case 'tool':
                 try {
                   const toolData = JSON.parse(data);
-                  const isSearch = toolData.name?.includes('search');
-                  // Add to single activity part
-                  activityPart.activities = [...(activityPart.activities || []), {
+                  const isSearch = toolData.name?.includes('search') || toolData.name === 'WebSearch' || toolData.name === 'WebFetch';
+                  streamState.activities.push({
                     type: isSearch ? 'search' : 'tool',
                     name: toolData.name,
                     detail: getToolDetail(toolData),
                     data: toolData,
-                  }];
-                  updateParts();
+                    timestamp: Date.now(),
+                  });
+                  updateUI();
                 } catch { /* ignore */ }
                 break;
 
               case 'artifact':
                 try {
                   const artifactData = parseArtifact(JSON.parse(data));
-                  artifactPart = { type: 'artifact', content: '', artifact: artifactData };
-                  updateParts();
+                  streamState.artifact = artifactData;
+                  updateUI();
                   setActiveArtifact(artifactData);
-                  artifactsRef.current.set(messages.length + 1, artifactData);
                 } catch { /* ignore */ }
-                break;
-
-              case 'done':
-                // Complete
                 break;
 
               case 'error':
@@ -1030,33 +1079,43 @@ function MainApp() {
         }
       }
 
-      // Build final parts array with proper order
+      // ========== FINALIZE ==========
+      streamState.endTime = Date.now();
+      const duration = (streamState.endTime - streamState.startTime) / 1000;
+
       const finalParts: MessagePart[] = [];
-      if (activityPart.activities && activityPart.activities.length > 0) {
-        finalParts.push(activityPart);
-      }
-      if (textPart) {
-        finalParts.push(textPart);
-      }
-      if (artifactPart) {
-        finalParts.push(artifactPart);
+
+      if (streamState.activities.length > 0) {
+        finalParts.push({
+          type: 'activity',
+          content: '',
+          activities: streamState.activities,
+          startTime: streamState.startTime,
+          endTime: streamState.endTime,
+          duration,
+        });
       }
 
-      // Finalize
-      if (fullResponse && activeThreadId) {
-        await sendMessage({ threadId: activeThreadId, role: 'assistant', content: fullResponse });
+      if (streamState.textContent) {
+        finalParts.push({ type: 'text', content: streamState.textContent });
+      }
+
+      if (streamState.artifact) {
+        finalParts.push({ type: 'artifact', content: '', artifact: streamState.artifact });
+      }
+
+      // Save to Convex in background (fire-and-forget)
+      if (streamState.textContent && activeThreadId) {
+        sendMessage({ threadId: activeThreadId, role: 'assistant', content: streamState.textContent });
       }
 
       setMessages(prev => [...prev, { role: 'assistant', parts: finalParts }]);
       setCurrentParts([]);
       setIsLoading(false);
-      // Unlock sync after delay to let Convex propagate
-      setTimeout(() => setSyncLocked(false), 2000);
 
     } catch (error) {
       console.error('Approval error:', error);
       setIsLoading(false);
-      setSyncLocked(false);
     }
   };
 
