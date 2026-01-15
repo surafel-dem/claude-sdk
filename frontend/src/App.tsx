@@ -5,7 +5,7 @@ import { api } from '@convex/_generated/api';
 import type { Id } from '@convex/_generated/dataModel';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Loader2, FileText, X, Check, Edit3, Sparkles, Plus, MessageSquare, Trash2, LogOut, ArrowUp, ChevronDown, Monitor, Cloud } from 'lucide-react';
+import { Loader2, FileText, X, Check, Edit3, Sparkles, Plus, MessageSquare, Trash2, LogOut, ArrowUp, ChevronDown, ChevronRight, Monitor, Cloud, Search, Globe, FileEdit } from 'lucide-react';
 import { useSession, signIn, signUp, signOut } from './lib/auth-client';
 import './App.css';
 
@@ -15,6 +15,7 @@ interface Activity {
   name: string;
   detail?: string;
   data?: Record<string, unknown>;
+  timestamp?: number; // When this activity occurred
 }
 
 interface Artifact {
@@ -24,6 +25,15 @@ interface Artifact {
   content: string;
   editable?: boolean;
   preview?: string;
+}
+
+// Stream state for tracking timing
+interface StreamState {
+  startTime: number;
+  endTime?: number;
+  activities: Activity[];
+  textContent: string;
+  artifact: Artifact | null;
 }
 
 // Helper to parse server artifact data
@@ -270,33 +280,116 @@ function Sidebar({
   );
 }
 
-// === Status Indicator (Simple) ===
-function StatusIndicator({ activities, isStreaming }: { activities: Activity[]; isStreaming?: boolean }) {
+// === Thinking Block (Collapsible like Claude Code) ===
+function ThinkingBlock({ activities, isStreaming }: { activities: Activity[]; isStreaming?: boolean }) {
+  const [isExpanded, setIsExpanded] = useState(false);
+
   if (activities.length === 0) return null;
 
-  // Get the latest status-like activity
-  const getStatus = (): string => {
-    const steps = activities.filter(a => a.type === 'step');
-    if (steps.length > 0) return steps[steps.length - 1].name;
-
-    const searches = activities.filter(a => a.type === 'search');
-    if (searches.length > 0 && isStreaming) {
-      return `Searching (${searches.length})...`;
+  // Get icon for activity type
+  const getActivityIcon = (activity: Activity) => {
+    if (activity.type === 'search' || activity.name?.toLowerCase().includes('search')) {
+      return <Search size={12} />;
     }
-
-    const tools = activities.filter(a => a.type === 'tool');
-    if (tools.length > 0 && isStreaming) {
-      return tools[tools.length - 1].name;
+    if (activity.name?.toLowerCase().includes('read') || activity.name?.toLowerCase().includes('fetch')) {
+      return <Globe size={12} />;
     }
-
-    return isStreaming ? 'Working...' : 'Complete';
+    if (activity.name?.toLowerCase().includes('write')) {
+      return <FileEdit size={12} />;
+    }
+    return <span className="activity-dot" />;
   };
 
+  // Get human-readable label for tool
+  const getActivityLabel = (activity: Activity): string => {
+    const name = activity.name || '';
+    // Map tool names to friendly labels
+    if (name.includes('exa-search__search')) return 'Web Search';
+    if (name.includes('exa-search__get_contents')) return 'Reading Sources';
+    if (name === 'Write') return 'Writing';
+    if (name === 'Read') return 'Reading';
+    if (activity.type === 'step') return activity.name;
+    if (activity.type === 'status') return activity.name;
+    return name;
+  };
+
+  // Get detail text (search query, URL, etc.)
+  const getActivityDetail = (activity: Activity): string | null => {
+    if (activity.detail) return activity.detail;
+    if (!activity.data) return null;
+
+    const data = activity.data as Record<string, unknown>;
+    const input = (data.input || data) as Record<string, unknown>;
+
+    // Search query
+    if (input.query) return `"${String(input.query).slice(0, 60)}${String(input.query).length > 60 ? '...' : ''}"`;
+    // URLs
+    if (input.urls && Array.isArray(input.urls)) {
+      const urls = input.urls as string[];
+      return urls.slice(0, 2).map(u => {
+        try { return new URL(u).hostname; } catch { return u.slice(0, 30); }
+      }).join(', ') + (urls.length > 2 ? ` +${urls.length - 2} more` : '');
+    }
+    // File path
+    if (input.file_path) {
+      const path = String(input.file_path);
+      return path.split('/').pop() || path;
+    }
+    return null;
+  };
+
+  // Get summary status
+  const getSummaryStatus = (): string => {
+    const steps = activities.filter(a => a.type === 'step' || a.type === 'status');
+    if (steps.length > 0) return steps[steps.length - 1].name;
+
+    const tools = activities.filter(a => a.type === 'tool' || a.type === 'search');
+    if (tools.length > 0) {
+      const last = tools[tools.length - 1];
+      return getActivityLabel(last);
+    }
+
+    return isStreaming ? 'Working...' : 'Completed';
+  };
+
+  // Filter to meaningful activities for the detail view
+  const meaningfulActivities = activities.filter(a =>
+    a.type === 'tool' || a.type === 'search' ||
+    (a.type === 'step' && a.name && !a.name.includes('...'))
+  );
+
   return (
-    <div className="status-indicator">
-      <span className={isStreaming ? "status-shimmer" : "status-text-finished"}>
-        {getStatus()}
-      </span>
+    <div className={`thinking-block ${isStreaming ? 'streaming' : 'completed'}`}>
+      <button
+        className="thinking-header"
+        onClick={() => setIsExpanded(!isExpanded)}
+      >
+        <ChevronRight
+          size={14}
+          className={`thinking-chevron ${isExpanded ? 'expanded' : ''}`}
+        />
+        <span className={isStreaming ? "thinking-status shimmer" : "thinking-status"}>
+          {getSummaryStatus()}
+        </span>
+        {meaningfulActivities.length > 0 && (
+          <span className="thinking-count">{meaningfulActivities.length} steps</span>
+        )}
+      </button>
+
+      {isExpanded && meaningfulActivities.length > 0 && (
+        <div className="thinking-details">
+          {meaningfulActivities.map((activity, i) => {
+            const detail = getActivityDetail(activity);
+            return (
+              <div key={i} className="thinking-step">
+                <span className="thinking-step-icon">{getActivityIcon(activity)}</span>
+                <span className="thinking-step-label">{getActivityLabel(activity)}</span>
+                {detail && <span className="thinking-step-detail">{detail}</span>}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -410,50 +503,55 @@ function MessageContent({ parts, isStreaming, onArtifactClick }: {
   isStreaming?: boolean;
   onArtifactClick?: (artifact: Artifact) => void;
 }) {
-  // Collect all activities for a single status indicator
+  // Collect all activities and separate text/artifacts
   const allActivities: Activity[] = [];
-  const contentGroups: { type: 'text' | 'artifact'; content: string; artifact?: Artifact }[] = [];
+  const textParts: string[] = [];
+  const artifacts: Artifact[] = [];
 
   for (const part of parts) {
     if (part.type === 'activity' && part.activities) {
       allActivities.push(...part.activities);
     } else if (part.type === 'artifact' && part.artifact) {
-      contentGroups.push({ type: 'artifact', content: '', artifact: part.artifact });
+      artifacts.push(part.artifact);
     } else if (part.type === 'text') {
       const cleanedText = cleanInternalMarkers(part.content);
       if (cleanedText.trim()) {
-        // Merge consecutive text parts
-        const lastGroup = contentGroups[contentGroups.length - 1];
-        if (lastGroup && lastGroup.type === 'text') {
-          lastGroup.content += cleanedText;
-        } else {
-          contentGroups.push({ type: 'text', content: cleanedText });
-        }
+        textParts.push(cleanedText);
       }
     }
   }
 
+  // Combine all text into one block
+  const combinedText = textParts.join('');
+
   // Don't render anything if there's no content
-  if (contentGroups.length === 0 && allActivities.length === 0) {
+  if (!combinedText && artifacts.length === 0 && allActivities.length === 0) {
     return null;
   }
 
+  // During streaming with activities: ONLY show ThinkingBlock, hide text until done
+  // This prevents the "congested" look where text appears above/with status updates
+  const shouldHideTextDuringStream = isStreaming && allActivities.length > 0;
+
+  // Render order: Thinking block → Text summary → Artifacts
   return (
     <div className="message-content">
-      {contentGroups.map((group, i) => {
-        if (group.type === 'text') {
-          return <div key={i} className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{group.content}</ReactMarkdown></div>;
-        }
-        if (group.type === 'artifact' && group.artifact) {
-          return <ArtifactCard key={i} artifact={group.artifact} onClick={() => onArtifactClick?.(group.artifact!)} />;
-        }
-        return null;
-      })}
-
-      {/* Status indicator for research steps */}
+      {/* 1. Collapsible thinking block (shows what agent is doing) */}
       {allActivities.length > 0 && (
-        <StatusIndicator activities={allActivities} isStreaming={isStreaming} />
+        <ThinkingBlock activities={allActivities} isStreaming={isStreaming} />
       )}
+
+      {/* 2. Text summary (only show when not actively streaming with activities) */}
+      {combinedText && !shouldHideTextDuringStream && (
+        <div className="markdown">
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{combinedText}</ReactMarkdown>
+        </div>
+      )}
+
+      {/* 3. Artifact cards (deliverables like reports) */}
+      {artifacts.map((artifact, i) => (
+        <ArtifactCard key={i} artifact={artifact} onClick={() => onArtifactClick?.(artifact)} />
+      ))}
     </div>
   );
 }
@@ -662,77 +760,96 @@ function MainApp() {
       const data = await chatResponse.json();
       currentRunIdRef.current = data.runId;  // Store runId for continuation
       const eventSource = new EventSource(`http://localhost:3001/api/stream/${data.runId}`);
-      let parts: MessagePart[] = [];
-      let currentActivities: Activity[] = [];
+
+      // Use single parts for each type to maintain proper order
+      let activityPart: MessagePart = { type: 'activity', content: '', activities: [] };
+      let textContent = '';
+      let artifactPart: MessagePart | null = null;
       let fullResponse = '';
 
+      // Helper to update currentParts with proper order
+      const updateStreamParts = () => {
+        const newParts: MessagePart[] = [];
+        // 1. Activity (ThinkingBlock) first
+        if (activityPart.activities && activityPart.activities.length > 0) {
+          newParts.push({ ...activityPart, activities: [...activityPart.activities] });
+        }
+        // 2. Text (hidden during streaming if activities exist)
+        if (textContent) {
+          newParts.push({ type: 'text', content: textContent });
+        }
+        // 3. Artifact last
+        if (artifactPart) {
+          newParts.push(artifactPart);
+        }
+        setCurrentParts(newParts);
+      };
+
       eventSource.addEventListener('text', (event) => {
-        if (currentActivities.length > 0) {
-          parts = [...parts, { type: 'activity', content: '', activities: [...currentActivities] }];
-          currentActivities = [];
-        }
         fullResponse += event.data;
-        const lastPart = parts[parts.length - 1];
-        if (lastPart && lastPart.type === 'text') {
-          lastPart.content += event.data;
-        } else {
-          parts = [...parts, { type: 'text', content: event.data }];
-        }
-        setCurrentParts([...parts]);
+        textContent += event.data;
+        updateStreamParts();
       });
 
       eventSource.addEventListener('tool', (event) => {
         try {
           const toolData = JSON.parse(event.data);
-          const isSearch = toolData.name === 'WebSearch' || toolData.name === 'WebFetch';
-          currentActivities.push({
+          const isSearch = toolData.name?.includes('search') || toolData.name === 'WebSearch' || toolData.name === 'WebFetch';
+          activityPart.activities = [...(activityPart.activities || []), {
             type: isSearch ? 'search' : 'tool',
             name: toolData.name,
             detail: getToolDetail(toolData),
-          });
-          updateActivityParts(parts, currentActivities, setCurrentParts);
+            data: toolData,
+          }];
+          updateStreamParts();
         } catch { /* ignore */ }
       });
 
       eventSource.addEventListener('phase', (event) => {
-        currentActivities.push({ type: 'status', name: event.data });
-        updateActivityParts(parts, currentActivities, setCurrentParts);
+        activityPart.activities = [...(activityPart.activities || []), { type: 'status', name: event.data }];
+        updateStreamParts();
       });
 
       eventSource.addEventListener('status', (event) => {
-        // Replace last status instead of accumulating
-        const lastIdx = currentActivities.findIndex(a => a.type === 'step');
+        // Replace last step status instead of accumulating
+        const activities = activityPart.activities || [];
+        const lastIdx = activities.findIndex(a => a.type === 'step');
         if (lastIdx >= 0) {
-          currentActivities[lastIdx] = { type: 'step', name: event.data };
+          activities[lastIdx] = { type: 'step', name: event.data };
+          activityPart.activities = [...activities];
         } else {
-          currentActivities.push({ type: 'step', name: event.data });
+          activityPart.activities = [...activities, { type: 'step', name: event.data }];
         }
-        updateActivityParts(parts, currentActivities, setCurrentParts);
+        updateStreamParts();
       });
 
       eventSource.addEventListener('artifact', (event) => {
         try {
           const artifactData = parseArtifact(JSON.parse(event.data));
-          if (currentActivities.length > 0) {
-            parts = [...parts, { type: 'activity', content: '', activities: [...currentActivities] }];
-            currentActivities = [];
-          }
-          parts = [...parts, { type: 'artifact', content: '', artifact: artifactData }];
-          setCurrentParts([...parts]);
+          artifactPart = { type: 'artifact', content: '', artifact: artifactData };
+          updateStreamParts();
 
           // Auto-open artifact panel for plans and reports
           setActiveArtifact(artifactData);
 
           // Save artifact to ref so Convex sync doesn't lose it
-          // Use the current message count as the index
           artifactsRef.current.set(messages.length, artifactData);
         } catch { /* ignore */ }
       });
 
       eventSource.addEventListener('done', async () => {
         eventSource.close();
-        if (currentActivities.length > 0) {
-          parts = [...parts, { type: 'activity', content: '', activities: currentActivities }];
+
+        // Build final parts with proper order
+        const finalParts: MessagePart[] = [];
+        if (activityPart.activities && activityPart.activities.length > 0) {
+          finalParts.push(activityPart);
+        }
+        if (textContent) {
+          finalParts.push({ type: 'text', content: textContent });
+        }
+        if (artifactPart) {
+          finalParts.push(artifactPart);
         }
 
         // Save assistant message to Convex
@@ -740,7 +857,7 @@ function MainApp() {
           await sendMessage({ threadId, role: 'assistant', content: fullResponse });
         }
 
-        setMessages(prev => [...prev, { role: 'assistant', parts: [...parts] }]);
+        setMessages(prev => [...prev, { role: 'assistant', parts: finalParts }]);
         setCurrentParts([]);
         setIsLoading(false);
         // Unlock sync after delay to let Convex propagate
@@ -815,9 +932,29 @@ function MainApp() {
       }
 
       // Read SSE from POST response body
-      let parts: MessagePart[] = [];
-      let currentActivities: Activity[] = [];
+      // Use a single activity part that accumulates all activities
+      let activityPart: MessagePart = { type: 'activity', content: '', activities: [] };
+      let textPart: MessagePart | null = null;
+      let artifactPart: MessagePart | null = null;
       let fullResponse = '';
+
+      // Helper to update currentParts with proper order
+      const updateParts = () => {
+        const newParts: MessagePart[] = [];
+        // Always add activity part first (ThinkingBlock)
+        if (activityPart.activities && activityPart.activities.length > 0) {
+          newParts.push({ ...activityPart, activities: [...activityPart.activities] });
+        }
+        // Then text (will be hidden during streaming by MessageContent)
+        if (textPart) {
+          newParts.push(textPart);
+        }
+        // Finally artifact
+        if (artifactPart) {
+          newParts.push(artifactPart);
+        }
+        setCurrentParts(newParts);
+      };
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
@@ -840,33 +977,42 @@ function MainApp() {
             switch (eventType) {
               case 'text':
                 fullResponse += data;
-                parts = [...parts, { type: 'text', content: data }];
-                setCurrentParts([...parts]);
+                // Accumulate text into single part
+                if (textPart) {
+                  textPart = { type: 'text', content: textPart.content + data };
+                } else {
+                  textPart = { type: 'text', content: data };
+                }
+                updateParts();
                 break;
 
               case 'status':
               case 'phase':
-                currentActivities.push({ type: 'step', name: data });
-                parts = [...parts, { type: 'activity', content: '', activities: [...currentActivities] }];
-                currentActivities = [];
-                setCurrentParts([...parts]);
+                // Add to single activity part (don't create new parts)
+                activityPart.activities = [...(activityPart.activities || []), { type: 'step', name: data }];
+                updateParts();
                 break;
 
               case 'tool':
                 try {
                   const toolData = JSON.parse(data);
-                  currentActivities.push({ type: 'tool', name: toolData.name, detail: toolData.input?.query });
-                  parts = [...parts, { type: 'activity', content: '', activities: [...currentActivities] }];
-                  currentActivities = [];
-                  setCurrentParts([...parts]);
+                  const isSearch = toolData.name?.includes('search');
+                  // Add to single activity part
+                  activityPart.activities = [...(activityPart.activities || []), {
+                    type: isSearch ? 'search' : 'tool',
+                    name: toolData.name,
+                    detail: getToolDetail(toolData),
+                    data: toolData,
+                  }];
+                  updateParts();
                 } catch { /* ignore */ }
                 break;
 
               case 'artifact':
                 try {
                   const artifactData = parseArtifact(JSON.parse(data));
-                  parts = [...parts, { type: 'artifact', content: '', artifact: artifactData }];
-                  setCurrentParts([...parts]);
+                  artifactPart = { type: 'artifact', content: '', artifact: artifactData };
+                  updateParts();
                   setActiveArtifact(artifactData);
                   artifactsRef.current.set(messages.length + 1, artifactData);
                 } catch { /* ignore */ }
@@ -884,12 +1030,24 @@ function MainApp() {
         }
       }
 
+      // Build final parts array with proper order
+      const finalParts: MessagePart[] = [];
+      if (activityPart.activities && activityPart.activities.length > 0) {
+        finalParts.push(activityPart);
+      }
+      if (textPart) {
+        finalParts.push(textPart);
+      }
+      if (artifactPart) {
+        finalParts.push(artifactPart);
+      }
+
       // Finalize
       if (fullResponse && activeThreadId) {
         await sendMessage({ threadId: activeThreadId, role: 'assistant', content: fullResponse });
       }
 
-      setMessages(prev => [...prev, { role: 'assistant', parts: [...parts] }]);
+      setMessages(prev => [...prev, { role: 'assistant', parts: finalParts }]);
       setCurrentParts([]);
       setIsLoading(false);
       // Unlock sync after delay to let Convex propagate
@@ -1077,20 +1235,22 @@ export default function App() {
 }
 
 // === Helpers ===
-function updateActivityParts(parts: MessagePart[], activities: Activity[], setter: (parts: MessagePart[]) => void) {
-  const newParts = [...parts];
-  const lastPart = newParts[newParts.length - 1];
-  if (lastPart && lastPart.type === 'activity') {
-    lastPart.activities = [...activities];
-  } else {
-    newParts.push({ type: 'activity', content: '', activities: [...activities] });
-  }
-  setter(newParts);
-}
+function getToolDetail(toolData: { name: string; input?: Record<string, unknown> }): string {
+  const input = toolData.input || {};
+  const name = toolData.name || '';
 
-function getToolDetail(toolData: { name: string; input: Record<string, unknown> }): string {
-  const input = toolData.input;
-  switch (toolData.name) {
+  // Handle Exa search tools
+  if (name.includes('exa-search__search')) {
+    return String(input.query || '').slice(0, 50);
+  }
+  if (name.includes('exa-search__get_contents')) {
+    const urls = input.urls as string[] || [];
+    return urls.slice(0, 2).map(u => {
+      try { return new URL(u).hostname; } catch { return u.slice(0, 20); }
+    }).join(', ');
+  }
+
+  switch (name) {
     case 'Read':
     case 'Write':
       return String(input.file_path || '').split('/').pop() || '';
@@ -1099,6 +1259,8 @@ function getToolDetail(toolData: { name: string; input: Record<string, unknown> 
     case 'WebFetch':
       return String(input.url || '').replace(/^https?:\/\//, '').slice(0, 40);
     default:
+      // Try to extract query from input if available
+      if (input.query) return String(input.query).slice(0, 40);
       return '';
   }
 }
