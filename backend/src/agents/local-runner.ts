@@ -25,6 +25,7 @@ type RunOptions = {
     task: string;
     mode: 'local' | 'sandbox';
     sdkSessionId?: string; // For resumption
+    abortController?: AbortController; // For stop functionality
 };
 
 /**
@@ -46,7 +47,7 @@ export async function* runLocal(options: RunOptions): AsyncGenerator<StreamEvent
 
     // Track tool calls to Convex
     const trackToolCall = (toolName: string, input: unknown) => {
-        logToolCall(threadId, threadId, 'researcher', toolName, input).catch(() => {});
+        logToolCall(threadId, threadId, 'researcher', toolName, input).catch(() => { });
     };
 
     yield { type: 'status', content: 'Starting research...' };
@@ -86,6 +87,7 @@ export async function* runLocal(options: RunOptions): AsyncGenerator<StreamEvent
                 permissionMode: 'acceptEdits',
                 includePartialMessages: true,
                 hooks,
+                abortController: options.abortController,
             },
         })) {
             // Capture SDK session ID on init
@@ -154,6 +156,12 @@ export async function* runLocal(options: RunOptions): AsyncGenerator<StreamEvent
             }
         }
     } catch (error) {
+        // Check if aborted by user
+        if (options.abortController?.signal.aborted) {
+            console.log(`[local-runner] Stopped by user: ${threadId}`);
+            yield { type: 'stopped', content: 'Stopped by user' };
+            return;
+        }
         console.error(`[local-runner] Error:`, error);
         const errorMessage = error instanceof Error ? error.message : String(error);
         yield { type: 'error', content: errorMessage };

@@ -58,6 +58,7 @@ export default defineSchema({
         phase: v.string(),
         plan: v.optional(v.string()),
         mode: v.string(),
+        provider: v.optional(v.string()),  // Sandbox provider (e2b, cloudflare, daytona)
         createdAt: v.number(),
         updatedAt: v.number(),
     }).index("by_thread", ["threadId"]),

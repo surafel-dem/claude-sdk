@@ -86,6 +86,7 @@ export interface Session {
     phase: string;
     plan?: string;
     mode: string;
+    provider?: string;  // Sandbox provider (e2b, cloudflare, daytona)
 }
 
 export async function getSession(threadId: string): Promise<Session | null> {

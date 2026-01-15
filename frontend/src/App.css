@@ -237,6 +237,38 @@ body {
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
+  position: relative;
+  transition: width 0.2s ease;
+}
+
+/* Collapsed Sidebar */
+.sidebar.collapsed {
+  width: 52px;
+}
+
+/* Sidebar Toggle Button */
+.sidebar-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  margin: 12px 8px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: all 0.15s ease;
+}
+
+.sidebar-toggle:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.sidebar.collapsed .sidebar-toggle {
+  margin: 12px auto;
 }
 
 .sidebar-header {
@@ -435,17 +467,62 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  position: relative;
 }
 
 .messages {
   flex: 1;
   overflow-y: auto;
-  padding: 40px 20px;
+  padding: 40px 20px 120px;
+  /* Extra bottom padding for floating input */
 }
 
 .messages>div {
   max-width: 720px;
   margin: 0 auto;
+}
+
+/* Floating Input Container - sticks to bottom of chat area */
+.floating-input-container {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding: 16px 20px 20px;
+  background: linear-gradient(to top, var(--bg-primary) 80%, transparent);
+  pointer-events: none;
+}
+
+.floating-input-container .claude-input {
+  max-width: 720px;
+  margin: 0 auto;
+  pointer-events: auto;
+}
+
+/* Chat Scroll to Bottom Button */
+.chat-scroll-to-bottom {
+  position: absolute;
+  bottom: 100px;
+  right: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: none;
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-radius: 50%;
+  box-shadow: var(--shadow-md);
+  transition: all 0.15s ease;
+  z-index: 10;
+}
+
+.chat-scroll-to-bottom:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  transform: translateY(2px);
 }
 
 /* === Landing Page (Centered Welcome) === */
@@ -516,7 +593,8 @@ body {
   background: var(--bg-elevated);
   border: 1px solid var(--border);
   border-radius: 20px;
-  overflow: hidden;
+  overflow: visible;
+  /* Changed from hidden to allow dropdown to extend */
   transition: border-color 0.2s ease;
   box-shadow: var(--shadow-sm);
 }
@@ -642,6 +720,93 @@ body {
   background: var(--bg-tertiary);
   color: var(--text-muted);
   cursor: not-allowed;
+}
+
+/* Stop Button */
+.stop-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  border: none;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+}
+
+.stop-btn:hover {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+}
+
+/* Mode Dropdown Menu */
+.mode-dropdown-menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  min-width: 180px;
+  z-index: 9999;
+  overflow: visible;
+}
+
+.mode-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.mode-option:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.mode-option.active {
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+}
+
+.mode-option svg:last-child {
+  margin-left: auto;
+  color: var(--accent);
+}
+
+/* Group header in dropdown */
+.mode-group-header {
+  padding: 8px 12px 4px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+}
+
+/* Disabled option */
+.mode-option.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.mode-option.disabled:hover {
+  background: transparent;
+  color: var(--text-secondary);
 }
 
 /* === Messages === */
@@ -1049,23 +1214,298 @@ body {
 
 /* === Artifact Panel === */
 .artifact-panel {
-  width: 480px;
-  background: var(--bg-secondary);
-  border-left: 1px solid var(--border);
+  min-width: 360px;
+  max-width: 70%;
+  background: var(--bg-tertiary);
+  /* Slightly different from chat area */
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
+  position: relative;
+  padding: 16px;
+  padding-left: 24px;
+  /* Extra space for resize handle */
 }
 
-.panel-header {
+.artifact-panel.resizing {
+  transition: none;
+}
+
+/* Resize Handle */
+.resize-handle {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  cursor: col-resize;
+  background: transparent;
+  transition: background 0.15s ease;
+  z-index: 10;
+}
+
+.resize-handle:hover {
+  background: var(--accent-soft);
+}
+
+.resize-handle:active,
+.artifact-panel.resizing .resize-handle {
+  background: var(--accent);
+  opacity: 0.3;
+}
+
+/* Inner Document Container */
+.artifact-container {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-elevated);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* Document Header */
+.artifact-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 16px;
+  padding: 14px 18px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-tertiary);
 }
 
+.artifact-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+}
+
+.artifact-title svg {
+  color: var(--accent);
+}
+
+.artifact-badge {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 3px 8px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-radius: 4px;
+}
+
+.artifact-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: all 0.15s ease;
+}
+
+.artifact-close:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+/* Document Content */
+.artifact-document {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px;
+  min-height: 0;
+}
+
+.artifact-content {
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--text-primary);
+}
+
+.artifact-content h1 {
+  font-size: 22px;
+  font-weight: 600;
+  margin: 0 0 16px;
+  letter-spacing: -0.02em;
+}
+
+.artifact-content h2 {
+  font-size: 18px;
+  font-weight: 600;
+  margin: 24px 0 12px;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+}
+
+.artifact-content h3 {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 20px 0 10px;
+}
+
+.artifact-content p {
+  margin: 0 0 14px;
+}
+
+.artifact-content ul,
+.artifact-content ol {
+  margin: 0 0 14px;
+  padding-left: 20px;
+}
+
+.artifact-content li {
+  margin-bottom: 6px;
+}
+
+.artifact-content a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.artifact-content a:hover {
+  text-decoration: underline;
+}
+
+.artifact-content strong {
+  font-weight: 600;
+}
+
+/* Editor */
+.artifact-editor {
+  width: 100%;
+  height: 100%;
+  min-height: 400px;
+  padding: 0;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-primary);
+  background: transparent;
+  border: none;
+  resize: none;
+}
+
+.artifact-editor:focus {
+  outline: none;
+}
+
+/* Approval Footer */
+.artifact-approval {
+  padding: 16px 18px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-secondary);
+}
+
+/* Inline Actions - after document content */
+.artifact-inline-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 20px 0 8px;
+  margin-top: 24px;
+  border-top: 1px solid var(--border);
+}
+
+.inline-action-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: 50%;
+  transition: all 0.15s ease;
+}
+
+.inline-action-btn:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+/* Scroll to Bottom Button */
+.scroll-to-bottom {
+  position: absolute;
+  bottom: 16px;
+  right: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: none;
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-radius: 50%;
+  box-shadow: var(--shadow-md);
+  transition: all 0.15s ease;
+  z-index: 10;
+}
+
+.scroll-to-bottom:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  transform: translateY(2px);
+}
+
+/* Edit Actions Footer */
+.artifact-edit-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-secondary);
+}
+
+.edit-action-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.edit-action-btn:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.edit-action-btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
+.edit-action-btn.primary:hover {
+  opacity: 0.9;
+}
+
+/* Keep old panel styles for backward compat (may be used elsewhere) */
 .panel-title {
   display: flex;
   align-items: center;
@@ -1284,6 +1724,7 @@ body {
     opacity: 0;
     transform: translateY(-4px);
   }
+
   to {
     opacity: 1;
     transform: translateY(0);

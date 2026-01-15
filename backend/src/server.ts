@@ -19,6 +19,7 @@ import {
     initRun,
     getRunState,
     approveRun,
+    abortRun,
     runPlanning,
     runResearch,
 } from './agents/index.js';
@@ -32,6 +33,7 @@ const chatSchema = z.object({
     message: z.string().min(1),
     threadId: z.string().optional(),
     mode: z.enum(['local', 'sandbox']).default('local'),
+    provider: z.enum(['e2b', 'cloudflare', 'daytona']).optional(),
 });
 
 const continueSchema = z.object({
@@ -63,11 +65,11 @@ const routes = app
 
     // Initialize run (checks for existing session)
     .post('/api/chat', zValidator('json', chatSchema), async (c) => {
-        const { message, threadId, mode } = c.req.valid('json');
+        const { message, threadId, mode, provider } = c.req.valid('json');
         const runId = threadId || crypto.randomUUID();
 
-        const state = await initRun(runId, message, mode);
-        console.log(`[server] Run ${runId}: phase=${state.phase}, mode=${mode}`);
+        const state = await initRun(runId, message, mode, provider);
+        console.log(`[server] Run ${runId}: phase=${state.phase}, mode=${mode}, provider=${provider || 'n/a'}`);
 
         return c.json({ runId, threadId: runId, phase: state.phase }, 200);
     })
@@ -166,6 +168,20 @@ const routes = app
                 await stream.writeSSE({ event: 'error', data: String(err) });
             }
         );
+    })
+
+    // Stop an active run
+    .post('/api/stop/:runId', async (c) => {
+        const runId = c.req.param('runId');
+
+        const success = abortRun(runId);
+
+        if (success) {
+            console.log(`[server] Run ${runId} stopped by user`);
+            return c.json({ ok: true, message: 'Run stopped' }, 200);
+        }
+
+        return c.json({ error: 'Run not found or already completed' }, 404);
     })
 
     // Get run status (with session lookup)

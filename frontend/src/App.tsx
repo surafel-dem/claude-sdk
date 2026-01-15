@@ -5,8 +5,9 @@ import { api } from '@convex/_generated/api';
 import type { Id } from '@convex/_generated/dataModel';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Loader2, FileText, X, Check, Edit3, Sparkles, Plus, MessageSquare, Trash2, LogOut, ArrowUp, ChevronDown, ChevronRight, Monitor, Cloud, Search, Globe, FileEdit } from 'lucide-react';
+import { Loader2, FileText, X, Check, Edit3, Sparkles, Plus, MessageSquare, Trash2, LogOut, ArrowUp, ChevronDown, ChevronRight, Monitor, Cloud, Search, Globe, FileEdit, Square, Zap, Server, Lock, Copy, Share2, Download, Printer, PanelLeft, PanelLeftClose } from 'lucide-react';
 import { useSession, signIn, signUp, signOut } from './lib/auth-client';
+import { type ExecutionModeId, isSandbox, getModeConfig } from './providers';
 import './App.css';
 
 // Types
@@ -202,11 +203,15 @@ function AuthScreen() {
 function Sidebar({
   activeThreadId,
   onSelectThread,
-  onNewThread
+  onNewThread,
+  isCollapsed,
+  onToggle
 }: {
   activeThreadId: Id<"threads"> | null;
   onSelectThread: (threadId: Id<"threads">) => void;
   onNewThread: () => void;
+  isCollapsed: boolean;
+  onToggle: () => void;
 }) {
   const threads = useQuery(api.threads.list);
   const removeThread = useMutation(api.threads.remove);
@@ -235,51 +240,60 @@ function Sidebar({
   };
 
   return (
-    <aside className="sidebar">
-      <div className="sidebar-header">
-        <span className="sidebar-title">Research Sessions</span>
-        <button className="new-btn" onClick={onNewThread}>
-          <Plus size={16} />
-        </button>
-      </div>
+    <aside className={`sidebar ${isCollapsed ? 'collapsed' : ''}`}>
+      {/* Toggle Button */}
+      <button className="sidebar-toggle" onClick={onToggle} title={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}>
+        {isCollapsed ? <PanelLeft size={18} /> : <PanelLeftClose size={18} />}
+      </button>
 
-      <div className="thread-list">
-        {threads === undefined ? (
-          <div className="loading-threads"><Loader2 size={16} className="spin" /></div>
-        ) : threads.length === 0 ? (
-          <div className="empty-threads">
-            <MessageSquare size={20} />
-            <span>No sessions yet</span>
-          </div>
-        ) : (
-          threads.map((thread) => (
-            <div
-              key={thread._id}
-              className={`thread-item ${activeThreadId === thread._id ? "active" : ""}`}
-              onClick={() => onSelectThread(thread._id)}
-            >
-              <div className="thread-info">
-                <span className="thread-title">{thread.title}</span>
-                <span className="thread-date">{formatDate(thread.updatedAt)}</span>
-              </div>
-              <button className="delete-btn" onClick={(e) => handleDelete(e, thread._id)}>
-                <Trash2 size={12} />
-              </button>
-            </div>
-          ))
-        )}
-      </div>
-
-      <div className="sidebar-footer">
-        {user && (
-          <div className="user-info">
-            <span className="user-email">{user.email || 'User'}</span>
-            <button className="signout-btn" onClick={() => signOut()}>
-              <LogOut size={14} />
+      {!isCollapsed && (
+        <>
+          <div className="sidebar-header">
+            <span className="sidebar-title">Research Sessions</span>
+            <button className="new-btn" onClick={onNewThread}>
+              <Plus size={16} />
             </button>
           </div>
-        )}
-      </div>
+
+          <div className="thread-list">
+            {threads === undefined ? (
+              <div className="loading-threads"><Loader2 size={16} className="spin" /></div>
+            ) : threads.length === 0 ? (
+              <div className="empty-threads">
+                <MessageSquare size={20} />
+                <span>No sessions yet</span>
+              </div>
+            ) : (
+              threads.map((thread) => (
+                <div
+                  key={thread._id}
+                  className={`thread-item ${activeThreadId === thread._id ? "active" : ""}`}
+                  onClick={() => onSelectThread(thread._id)}
+                >
+                  <div className="thread-info">
+                    <span className="thread-title">{thread.title}</span>
+                    <span className="thread-date">{formatDate(thread.updatedAt)}</span>
+                  </div>
+                  <button className="delete-btn" onClick={(e) => handleDelete(e, thread._id)}>
+                    <Trash2 size={12} />
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+
+          <div className="sidebar-footer">
+            {user && (
+              <div className="user-info">
+                <span className="user-email">{user.email || 'User'}</span>
+                <button className="signout-btn" onClick={() => signOut()}>
+                  <LogOut size={14} />
+                </button>
+              </div>
+            )}
+          </div>
+        </>
+      )}
     </aside>
   );
 }
@@ -296,6 +310,18 @@ function ThinkingBlock({
   duration?: number; // Duration in seconds when completed
 }) {
   const [isExpanded, setIsExpanded] = useState(false);
+  const [cycleIndex, setCycleIndex] = useState(0);
+
+  // Cycle through recent activities during streaming for dynamic status
+  useEffect(() => {
+    if (!isStreaming) return;
+
+    const interval = setInterval(() => {
+      setCycleIndex(prev => prev + 1);
+    }, 2000); // Cycle every 2 seconds
+
+    return () => clearInterval(interval);
+  }, [isStreaming]);
 
   if (activities.length === 0) return null;
 
@@ -361,20 +387,46 @@ function ThinkingBlock({
   };
 
   // Get summary status - shows live status during streaming, completion info when done
+  // Uses cycling for dynamic display like "Searching for AI agents..." → "Reading sources..."
   const getSummaryStatus = (): string => {
     // When completed, show duration
     if (!isStreaming && duration !== undefined) {
       return `Completed in ${formatDuration(duration)}`;
     }
 
-    // During streaming: show current action
-    const steps = activities.filter(a => a.type === 'step' || a.type === 'status');
-    if (steps.length > 0) return steps[steps.length - 1].name;
-
+    // During streaming: cycle through recent activities with details
     const tools = activities.filter(a => a.type === 'tool' || a.type === 'search');
-    if (tools.length > 0) {
-      const last = tools[tools.length - 1];
-      return getActivityLabel(last);
+    const steps = activities.filter(a => a.type === 'step' || a.type === 'status');
+
+    // Build a list of status messages to cycle through
+    const statusMessages: string[] = [];
+
+    // Add recent tool activities with their details
+    const recentTools = tools.slice(-5); // Last 5 tools
+    for (const tool of recentTools) {
+      const label = getActivityLabel(tool);
+      const detail = getActivityDetail(tool);
+      if (detail) {
+        // Format: "Searching for AI agents 2025..."
+        const truncatedDetail = detail.length > 40 ? detail.slice(0, 40) + '...' : detail;
+        statusMessages.push(`${label} ${truncatedDetail}`);
+      } else {
+        statusMessages.push(label);
+      }
+    }
+
+    // Add current step status if any
+    if (steps.length > 0) {
+      const lastStep = steps[steps.length - 1];
+      if (lastStep.name && !statusMessages.includes(lastStep.name)) {
+        statusMessages.push(lastStep.name);
+      }
+    }
+
+    // If we have messages, cycle through them
+    if (statusMessages.length > 0) {
+      const index = cycleIndex % statusMessages.length;
+      return statusMessages[statusMessages.length - 1 - index] || statusMessages[0];
     }
 
     return isStreaming ? 'Working...' : 'Completed';
@@ -453,56 +505,191 @@ function ArtifactPanel({ artifact, onClose, onSave, onApprove }: {
 }) {
   const [isEditing, setIsEditing] = useState(false);
   const [editContent, setEditContent] = useState(artifact.content);
+  const [panelWidth, setPanelWidth] = useState(600);  // Wider default - ~50% of viewport
+  const [isResizing, setIsResizing] = useState(false);
+  const [copySuccess, setCopySuccess] = useState(false);
+  const [showScrollDown, setShowScrollDown] = useState(false);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const documentRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => { setEditContent(artifact.content); }, [artifact.content]);
 
+  // Handle scroll state
+  useEffect(() => {
+    const doc = documentRef.current;
+    if (!doc) return;
+
+    const handleScroll = () => {
+      const { scrollTop, scrollHeight, clientHeight } = doc;
+      setShowScrollDown(scrollHeight - scrollTop - clientHeight > 100);
+    };
+
+    doc.addEventListener('scroll', handleScroll);
+    handleScroll();
+    return () => doc.removeEventListener('scroll', handleScroll);
+  }, [artifact.content]);
+
+  // Handle resize drag
+  useEffect(() => {
+    if (!isResizing) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!panelRef.current) return;
+      const containerRect = panelRef.current.parentElement?.getBoundingClientRect();
+      if (!containerRect) return;
+
+      const newWidth = containerRect.right - e.clientX;
+      const minWidth = 360;
+      const maxWidth = containerRect.width * 0.7;
+      setPanelWidth(Math.max(minWidth, Math.min(maxWidth, newWidth)));
+    };
+
+    const handleMouseUp = () => {
+      setIsResizing(false);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isResizing]);
+
   const handleSave = () => { onSave?.(editContent); setIsEditing(false); };
 
+  const handleCopy = async () => {
+    await navigator.clipboard.writeText(artifact.content);
+    setCopySuccess(true);
+    setTimeout(() => setCopySuccess(false), 2000);
+  };
+
+  const handleDownload = () => {
+    const blob = new Blob([artifact.content], { type: 'text/markdown' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${(artifact.title || 'document').toLowerCase().replace(/\s+/g, '-')}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handlePrint = () => {
+    const printWindow = window.open('', '_blank');
+    if (printWindow) {
+      printWindow.document.write(`
+        <html><head><title>${artifact.title}</title>
+        <style>body { font-family: Georgia, serif; max-width: 800px; margin: 40px auto; padding: 20px; line-height: 1.6; }</style>
+        </head><body>${artifact.content}</body></html>
+      `);
+      printWindow.document.close();
+      printWindow.print();
+    }
+  };
+
+  const scrollToBottom = () => {
+    documentRef.current?.scrollTo({ top: documentRef.current.scrollHeight, behavior: 'smooth' });
+  };
+
   return (
-    <div className="artifact-panel">
-      <div className="panel-header">
-        <div className="panel-title">
-          <FileText size={14} />
-          <span>{artifact.title}</span>
-          {artifact.type === 'plan' && (
-            <span className="panel-badge pending">Plan</span>
-          )}
+    <div
+      ref={panelRef}
+      className={`artifact-panel ${isResizing ? 'resizing' : ''}`}
+      style={{ width: panelWidth }}
+    >
+      {/* Resize Handle */}
+      <div
+        className="resize-handle"
+        onMouseDown={() => setIsResizing(true)}
+      />
+
+      {/* Inner Container - Document Look */}
+      <div className="artifact-container">
+        {/* Header */}
+        <div className="artifact-header">
+          <div className="artifact-title">
+            <FileText size={16} />
+            <span>{artifact.title}</span>
+            {artifact.type === 'plan' && (
+              <span className="artifact-badge">Plan</span>
+            )}
+          </div>
+          <button className="artifact-close" onClick={onClose} title="Close">
+            <X size={16} />
+          </button>
         </div>
-        <div className="panel-actions">
-          {artifact.editable && !isEditing && (
-            <button className="panel-btn" onClick={() => setIsEditing(true)}>
-              <Edit3 size={12} /> Edit
-            </button>
-          )}
-          {isEditing && (
+
+        {/* Document Content */}
+        <div className="artifact-document" ref={documentRef}>
+          {isEditing ? (
+            <textarea
+              className="artifact-editor"
+              value={editContent}
+              onChange={(e) => setEditContent(e.target.value)}
+            />
+          ) : (
             <>
-              <button className="panel-btn primary" onClick={handleSave}>
-                <Check size={12} /> Save
-              </button>
-              <button className="panel-btn" onClick={() => { setEditContent(artifact.content); setIsEditing(false); }}>
-                Cancel
-              </button>
+              <div className="artifact-content markdown">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{artifact.content}</ReactMarkdown>
+              </div>
+
+              {/* Inline Actions - after content */}
+              <div className="artifact-inline-actions">
+                {artifact.editable && (
+                  <button className="inline-action-btn" onClick={() => setIsEditing(true)} title="Edit">
+                    <Edit3 size={16} />
+                  </button>
+                )}
+                <button className="inline-action-btn" onClick={handleCopy} title={copySuccess ? 'Copied!' : 'Copy'}>
+                  {copySuccess ? <Check size={16} /> : <Copy size={16} />}
+                </button>
+                <button className="inline-action-btn" onClick={handleDownload} title="Download">
+                  <Download size={16} />
+                </button>
+                <button className="inline-action-btn" onClick={handlePrint} title="Print">
+                  <Printer size={16} />
+                </button>
+                <button className="inline-action-btn" title="Share">
+                  <Share2 size={16} />
+                </button>
+              </div>
             </>
           )}
-          <button className="panel-close" onClick={onClose}><X size={14} /></button>
         </div>
-      </div>
-      <div className="panel-content">
-        {isEditing ? (
-          <textarea className="panel-editor" value={editContent} onChange={(e) => setEditContent(e.target.value)} />
-        ) : (
-          <div className="panel-preview markdown">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{artifact.content}</ReactMarkdown>
+
+        {/* Scroll to bottom button */}
+        {showScrollDown && (
+          <button className="scroll-to-bottom" onClick={scrollToBottom} title="Scroll to bottom">
+            <ChevronDown size={18} />
+          </button>
+        )}
+
+        {/* Editing actions */}
+        {isEditing && (
+          <div className="artifact-edit-actions">
+            <button className="edit-action-btn" onClick={() => { setEditContent(artifact.content); setIsEditing(false); }}>
+              Cancel
+            </button>
+            <button className="edit-action-btn primary" onClick={handleSave}>
+              <Check size={14} /> Save
+            </button>
+          </div>
+        )}
+
+        {/* Approval Footer (for plans) */}
+        {artifact.type === 'plan' && artifact.editable && onApprove && (
+          <div className="artifact-approval">
+            <button className="approve-btn" onClick={onApprove}>
+              <Sparkles size={14} /> Approve & Start Research
+            </button>
           </div>
         )}
       </div>
-      {artifact.type === 'plan' && artifact.editable && onApprove && (
-        <div className="panel-footer approval-actions">
-          <button className="approve-btn" onClick={onApprove}>
-            <Sparkles size={14} /> Approve & Start Research
-          </button>
-        </div>
-      )}
     </div>
   );
 }
@@ -606,100 +793,134 @@ function MainApp() {
   const [currentParts, setCurrentParts] = useState<MessagePart[]>([]);
   const [activeThreadId, setActiveThreadId] = useState<Id<"threads"> | null>(null);
   const [activeArtifact, setActiveArtifact] = useState<Artifact | null>(null);
-  const [executionMode, setExecutionMode] = useState<'local' | 'sandbox'>('local');
+  const [executionMode, setExecutionMode] = useState<ExecutionModeId>('local');
+  const [modeDropdownOpen, setModeDropdownOpen] = useState(false);
+  const [showChatScrollDown, setShowChatScrollDown] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const currentRunIdRef = useRef<string | null>(null);  // Track current run for continuation
+  const eventSourceRef = useRef<EventSource | null>(null);  // Track EventSource for stop functionality
 
   // Convex mutations for persistence (fire-and-forget, don't affect UI)
   const createThread = useMutation(api.threads.create);
   const sendMessage = useMutation(api.messages.send);
   const updateArtifact = useMutation(api.artifacts.update);
 
-  // Load thread history from Convex - only used for initial load, not real-time sync
-  const loadThreadHistory = async (threadId: Id<"threads">) => {
-    try {
-      // Fetch messages and artifacts via Convex HTTP endpoint
-      const [messagesRes, artifactsRes] = await Promise.all([
-        fetch(`${import.meta.env.VITE_CONVEX_URL?.replace('.cloud', '.site') || 'https://animated-wallaby-539.convex.site'}/api/query?path=messages:list&args=${encodeURIComponent(JSON.stringify({ threadId }))}`),
-        fetch(`${import.meta.env.VITE_CONVEX_URL?.replace('.cloud', '.site') || 'https://animated-wallaby-539.convex.site'}/api/query?path=artifacts:listByThread&args=${encodeURIComponent(JSON.stringify({ threadId }))}`)
-      ]);
+  // Convex queries - used for loading thread history
+  const threadMessages = useQuery(
+    api.messages.list,
+    activeThreadId ? { threadId: activeThreadId } : "skip"
+  );
+  const threadArtifacts = useQuery(
+    api.artifacts.listByThread,
+    activeThreadId ? { threadId: activeThreadId } : "skip"
+  );
 
-      const messagesData = await messagesRes.json();
-      const artifactsData = await artifactsRes.json();
+  // Track if we've loaded the current thread (to avoid re-syncing during streaming)
+  const loadedThreadRef = useRef<string | null>(null);
 
-      const threadMessages = messagesData.value || [];
-      const threadArtifacts = artifactsData.value || [];
+  // Load thread history when switching threads (one-time load, not real-time)
+  useEffect(() => {
+    // Skip if no thread selected or if we're streaming
+    if (!activeThreadId || isLoading) return;
 
-      console.log('[Load] Thread history:', { messages: threadMessages.length, artifacts: threadArtifacts.length });
+    // Skip if we already loaded this thread
+    if (loadedThreadRef.current === activeThreadId) return;
 
-      if (threadMessages.length === 0) {
-        setMessages([]);
-        return;
+    // Skip if data isn't ready yet
+    if (threadMessages === undefined) return;
+
+    // Mark this thread as loaded
+    loadedThreadRef.current = activeThreadId;
+
+    console.log('[Load] Thread history:', {
+      messages: threadMessages?.length || 0,
+      artifacts: threadArtifacts?.length || 0
+    });
+
+    if (!threadMessages || threadMessages.length === 0) {
+      setMessages([]);
+      return;
+    }
+
+    // Track which artifacts have been assigned
+    const usedArtifactIds = new Set<string>();
+
+    const loadedMessages: Message[] = threadMessages.map((msg: { role: string; content: string; createdAt: number }) => {
+      let content = msg.content;
+      if (content.startsWith('APPROVED:')) {
+        content = '';
       }
 
-      // Track which artifacts have been assigned
-      const usedArtifactIds = new Set<string>();
+      const parts: MessagePart[] = [];
 
-      const loadedMessages: Message[] = threadMessages.map((msg: { role: string; content: string; createdAt: number }, index: number) => {
-        let content = msg.content;
-        if (content.startsWith('APPROVED:')) {
-          content = '';
-        }
+      if (content) {
+        parts.push({ type: 'text', content });
+      }
 
-        const parts: MessagePart[] = [];
+      // Attach artifacts to assistant messages
+      if (msg.role === 'assistant' && threadArtifacts && threadArtifacts.length > 0) {
+        const persistedArtifact = threadArtifacts.find((a: any) => {
+          if (usedArtifactIds.has(a._id)) return false;
+          return a.createdAt >= msg.createdAt - 5000 && a.createdAt <= msg.createdAt + 120000;
+        });
 
-        if (content) {
-          parts.push({ type: 'text', content });
-        }
-
-        // Attach artifacts to assistant messages
-        if (msg.role === 'assistant' && threadArtifacts.length > 0) {
-          const persistedArtifact = threadArtifacts.find((a: any) => {
-            if (usedArtifactIds.has(a._id)) return false;
-            return a.createdAt >= msg.createdAt - 5000 && a.createdAt <= msg.createdAt + 120000;
+        if (persistedArtifact) {
+          usedArtifactIds.add(persistedArtifact._id);
+          const isEditable = persistedArtifact.type === 'plan' && persistedArtifact.status === 'draft';
+          parts.push({
+            type: 'artifact',
+            content: '',
+            artifact: {
+              id: persistedArtifact._id,
+              type: persistedArtifact.type as 'plan' | 'report',
+              title: persistedArtifact.title,
+              content: persistedArtifact.content,
+              editable: isEditable
+            }
           });
-
-          if (persistedArtifact) {
-            usedArtifactIds.add(persistedArtifact._id);
-            const isEditable = persistedArtifact.type === 'plan' && persistedArtifact.status === 'draft';
-            parts.push({
-              type: 'artifact',
-              content: '',
-              artifact: {
-                id: persistedArtifact._id,
-                type: persistedArtifact.type as 'plan' | 'report',
-                title: persistedArtifact.title,
-                content: persistedArtifact.content,
-                editable: isEditable
-              }
-            });
-          }
         }
+      }
 
-        return { role: msg.role as 'user' | 'assistant', parts };
-      });
+      return { role: msg.role as 'user' | 'assistant', parts };
+    });
 
-      setMessages(loadedMessages);
-    } catch (error) {
-      console.error('[Load] Failed to load thread history:', error);
-      setMessages([]);
-    }
-  };
+    setMessages(loadedMessages);
+  }, [activeThreadId, threadMessages, threadArtifacts, isLoading]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, currentParts]);
 
-  // Load thread history when URL changes (switching threads)
+  // Handle chat scroll state for scroll-to-bottom button
+  useEffect(() => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+
+    const handleScroll = () => {
+      const { scrollTop, scrollHeight, clientHeight } = container;
+      setShowChatScrollDown(scrollHeight - scrollTop - clientHeight > 150);
+    };
+
+    container.addEventListener('scroll', handleScroll);
+    return () => container.removeEventListener('scroll', handleScroll);
+  }, []);
+
+  const scrollChatToBottom = () => {
+    messagesContainerRef.current?.scrollTo({ top: messagesContainerRef.current.scrollHeight, behavior: 'smooth' });
+  };
+
+  // Sync threadId from URL
   useEffect(() => {
     if (urlThreadId && urlThreadId !== activeThreadId) {
       const threadId = urlThreadId as Id<"threads">;
       setActiveThreadId(threadId);
       setCurrentParts([]);
       setActiveArtifact(null);
-      // Load history from Convex (one-time fetch, not real-time)
-      loadThreadHistory(threadId);
+      // Reset loaded flag so useEffect will load this thread's data
+      loadedThreadRef.current = null;
     }
   }, [urlThreadId]);
 
@@ -707,6 +928,7 @@ function MainApp() {
     setActiveThreadId(null);
     setMessages([]);
     setCurrentParts([]);
+    loadedThreadRef.current = null;
     navigate('/');
   };
 
@@ -714,9 +936,9 @@ function MainApp() {
     setActiveThreadId(threadId);
     setCurrentParts([]);
     setActiveArtifact(null);
+    // Reset loaded flag so useEffect will load this thread's data
+    loadedThreadRef.current = null;
     navigate(`/chat/${threadId}`);
-    // Load history from Convex (one-time fetch)
-    loadThreadHistory(threadId);
   };
 
   const handleTextareaChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -753,16 +975,21 @@ function MainApp() {
     sendMessage({ threadId, role: 'user', content: userMessage });
 
     try {
+      // Determine mode and provider from executionMode
+      const mode = isSandbox(executionMode) ? 'sandbox' : 'local';
+      const provider = isSandbox(executionMode) ? executionMode : undefined;
+
       const chatResponse = await fetch('http://localhost:3001/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: userMessage, threadId, mode: executionMode }),
+        body: JSON.stringify({ message: userMessage, threadId, mode, provider }),
         credentials: 'include',
       });
 
       const data = await chatResponse.json();
       currentRunIdRef.current = data.runId;
       const eventSource = new EventSource(`http://localhost:3001/api/stream/${data.runId}`);
+      eventSourceRef.current = eventSource;  // Store for stop functionality
 
       // ========== CLEAN STREAM STATE ==========
       // Single source of truth for all streaming data
@@ -908,18 +1135,52 @@ function MainApp() {
         setMessages(prev => [...prev, { role: 'assistant', parts: finalParts }]);
         setCurrentParts([]);
         setIsLoading(false);
+        eventSourceRef.current = null;
       });
 
       eventSource.addEventListener('error', () => {
         eventSource.close();
         setCurrentParts([]);
         setIsLoading(false);
+        eventSourceRef.current = null;
       });
 
     } catch (error) {
       console.error('Error:', error);
       setIsLoading(false);
     }
+  };
+
+  // Stop the current agent generation
+  const handleStop = async () => {
+    // 1. Close the EventSource connection
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+    }
+
+    // 2. Tell backend to abort the SDK query
+    if (currentRunIdRef.current) {
+      try {
+        await fetch(`http://localhost:3001/api/stop/${currentRunIdRef.current}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+        });
+      } catch (error) {
+        console.error('Failed to stop run:', error);
+      }
+    }
+
+    // 3. Finalize UI state - add partial response if any
+    if (currentParts.length > 0) {
+      const finalParts = [...currentParts];
+      finalParts.push({ type: 'text', content: '\n\n*[Stopped by user]*' });
+      setMessages(prev => [...prev, { role: 'assistant', parts: finalParts }]);
+    }
+
+    setCurrentParts([]);
+    setIsLoading(false);
+    currentRunIdRef.current = null;
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -1019,62 +1280,74 @@ function MainApp() {
         if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
 
-        for (let i = 0; i < lines.length; i++) {
-          const line = lines[i];
-          if (line.startsWith('event:')) {
-            const eventType = line.slice(6).trim();
-            const dataLine = lines[i + 1];
-            const data = dataLine?.startsWith('data:') ? dataLine.slice(5).trim() : '';
+        // SSE events are separated by double newlines
+        // Each event has format: event: <type>\ndata: <content>\n\n
+        const events = buffer.split('\n\n');
+        buffer = events.pop() || ''; // Keep incomplete event in buffer
 
-            switch (eventType) {
-              case 'text':
-                streamState.textContent += data;
-                updateUI();
-                break;
+        for (const event of events) {
+          if (!event.trim()) continue;
 
-              case 'status':
-              case 'phase':
-                // Replace existing step or add new one
-                const stepIdx = streamState.activities.findIndex(a => a.type === 'step');
-                if (stepIdx >= 0) {
-                  streamState.activities[stepIdx] = { type: 'step', name: data, timestamp: Date.now() };
-                } else {
-                  streamState.activities.push({ type: 'step', name: data, timestamp: Date.now() });
-                }
-                updateUI();
-                break;
+          const lines = event.split('\n');
+          let eventType = '';
+          let data = '';
 
-              case 'tool':
-                try {
-                  const toolData = JSON.parse(data);
-                  const isSearch = toolData.name?.includes('search') || toolData.name === 'WebSearch' || toolData.name === 'WebFetch';
-                  streamState.activities.push({
-                    type: isSearch ? 'search' : 'tool',
-                    name: toolData.name,
-                    detail: getToolDetail(toolData),
-                    data: toolData,
-                    timestamp: Date.now(),
-                  });
-                  updateUI();
-                } catch { /* ignore */ }
-                break;
-
-              case 'artifact':
-                try {
-                  const artifactData = parseArtifact(JSON.parse(data));
-                  streamState.artifact = artifactData;
-                  updateUI();
-                  setActiveArtifact(artifactData);
-                } catch { /* ignore */ }
-                break;
-
-              case 'error':
-                console.error('Research error:', data);
-                break;
+          for (const line of lines) {
+            if (line.startsWith('event:')) {
+              eventType = line.slice(6).trim();
+            } else if (line.startsWith('data:')) {
+              data = line.slice(5).trim();
             }
+          }
+
+          if (!eventType) continue;
+
+          switch (eventType) {
+            case 'text':
+              streamState.textContent += data;
+              updateUI();
+              break;
+
+            case 'status':
+            case 'phase':
+              // Replace existing step or add new one
+              const stepIdx = streamState.activities.findIndex(a => a.type === 'step');
+              if (stepIdx >= 0) {
+                streamState.activities[stepIdx] = { type: 'step', name: data, timestamp: Date.now() };
+              } else {
+                streamState.activities.push({ type: 'step', name: data, timestamp: Date.now() });
+              }
+              updateUI();
+              break;
+
+            case 'tool':
+              try {
+                const toolData = JSON.parse(data);
+                const isSearch = toolData.name?.includes('search') || toolData.name === 'WebSearch' || toolData.name === 'WebFetch';
+                streamState.activities.push({
+                  type: isSearch ? 'search' : 'tool',
+                  name: toolData.name,
+                  detail: getToolDetail(toolData),
+                  data: toolData,
+                  timestamp: Date.now(),
+                });
+                updateUI();
+              } catch { /* ignore */ }
+              break;
+
+            case 'artifact':
+              try {
+                const artifactData = parseArtifact(JSON.parse(data));
+                streamState.artifact = artifactData;
+                updateUI();
+                setActiveArtifact(artifactData);
+              } catch { /* ignore */ }
+              break;
+
+            case 'error':
+              console.error('Research error:', data);
+              break;
           }
         }
       }
@@ -1125,6 +1398,8 @@ function MainApp() {
         activeThreadId={activeThreadId}
         onSelectThread={handleSelectThread}
         onNewThread={handleNewThread}
+        isCollapsed={sidebarCollapsed}
+        onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
       />
 
       <div className="main-content">
@@ -1154,12 +1429,53 @@ function MainApp() {
                       <button
                         type="button"
                         className="mode-dropdown-trigger"
-                        onClick={() => setExecutionMode(executionMode === 'local' ? 'sandbox' : 'local')}
+                        onClick={() => setModeDropdownOpen(!modeDropdownOpen)}
                       >
                         {executionMode === 'local' ? <Monitor size={14} /> : <Cloud size={14} />}
-                        <span>{executionMode === 'local' ? 'Local' : 'Sandbox'}</span>
+                        <span>{getModeConfig(executionMode)?.name || 'Local'}</span>
                         <ChevronDown size={14} />
                       </button>
+                      {modeDropdownOpen && (
+                        <div className="mode-dropdown-menu">
+                          {/* Local option */}
+                          <button
+                            type="button"
+                            className={`mode-option ${executionMode === 'local' ? 'active' : ''}`}
+                            onClick={() => { setExecutionMode('local'); setModeDropdownOpen(false); }}
+                          >
+                            <Monitor size={14} />
+                            <span>Local</span>
+                            {executionMode === 'local' && <Check size={14} />}
+                          </button>
+
+                          {/* Sandboxes group header */}
+                          <div className="mode-group-header">SANDBOXES</div>
+
+                          {/* E2B option */}
+                          <button
+                            type="button"
+                            className={`mode-option ${executionMode === 'e2b' ? 'active' : ''}`}
+                            onClick={() => { setExecutionMode('e2b'); setModeDropdownOpen(false); }}
+                          >
+                            <Cloud size={14} />
+                            <span>E2B</span>
+                            {executionMode === 'e2b' && <Check size={14} />}
+                          </button>
+
+                          {/* Coming soon options */}
+                          <button type="button" className="mode-option disabled" disabled>
+                            <Zap size={14} />
+                            <span>Cloudflare Workers</span>
+                            <Lock size={12} />
+                          </button>
+
+                          <button type="button" className="mode-option disabled" disabled>
+                            <Server size={14} />
+                            <span>Daytona</span>
+                            <Lock size={12} />
+                          </button>
+                        </div>
+                      )}
                     </div>
                   </div>
                   <button type="submit" disabled={isLoading || !input.trim()} className="send-btn-arrow">
@@ -1182,88 +1498,141 @@ function MainApp() {
             </div>
           </div>
         ) : (
-          /* Chat state: messages + bottom input */
-          <>
-            <div className="main-container">
-              <main className="chat-area">
-                <div className="messages">
-                  {messages.map((msg, i) => {
-                    // Skip rendering if message has no meaningful content
-                    const hasContent = msg.parts.some(p =>
-                      (p.type === 'text' && p.content.trim()) ||
-                      p.type === 'artifact' ||
-                      (p.type === 'activity' && p.activities?.length)
-                    );
-                    if (!hasContent) return null;
+          /* Chat state: messages + floating input + artifact panel */
+          <div className="main-container">
+            <main className="chat-area">
+              <div className="messages" ref={messagesContainerRef}>
+                {messages.map((msg, i) => {
+                  // Skip rendering if message has no meaningful content
+                  const hasContent = msg.parts.some(p =>
+                    (p.type === 'text' && p.content.trim()) ||
+                    p.type === 'artifact' ||
+                    (p.type === 'activity' && p.activities?.length)
+                  );
+                  if (!hasContent) return null;
 
-                    return (
-                      <div key={i} className={`message ${msg.role}`}>
-                        <MessageContent parts={msg.parts} onArtifactClick={setActiveArtifact} />
+                  return (
+                    <div key={i} className={`message ${msg.role}`}>
+                      <MessageContent parts={msg.parts} onArtifactClick={setActiveArtifact} />
+                    </div>
+                  );
+                })}
+
+                {(currentParts.length > 0 || isLoading) && (
+                  <div className="message assistant">
+                    {currentParts.length > 0 ? (
+                      <MessageContent parts={currentParts} isStreaming onArtifactClick={setActiveArtifact} />
+                    ) : (
+                      <div className="status-indicator">
+                        <span className="status-shimmer">Thinking...</span>
                       </div>
-                    );
-                  })}
-
-                  {(currentParts.length > 0 || isLoading) && (
-                    <div className="message assistant">
-                      {currentParts.length > 0 ? (
-                        <MessageContent parts={currentParts} isStreaming onArtifactClick={setActiveArtifact} />
-                      ) : (
-                        <div className="status-indicator">
-                          <span className="status-shimmer">Thinking...</span>
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  <div ref={messagesEndRef} />
-                </div>
-              </main>
-
-              {activeArtifact && (
-                <ArtifactPanel
-                  artifact={activeArtifact}
-                  onClose={() => setActiveArtifact(null)}
-                  onSave={handleArtifactSave}
-                  onApprove={activeArtifact.type === 'plan' && activeArtifact.editable ? handleApprove : undefined}
-                />
-              )}
-            </div>
-
-            <footer className="input-area">
-              <form onSubmit={handleSubmit} className="claude-input">
-                <textarea
-                  ref={textareaRef}
-                  value={input}
-                  onChange={handleTextareaChange}
-                  onKeyDown={handleKeyDown}
-                  placeholder="Continue the conversation..."
-                  disabled={isLoading}
-                  rows={1}
-                />
-                <div className="claude-input-toolbar">
-                  <div className="toolbar-left">
-                    <button type="button" className="icon-btn" title="Attach files">
-                      <Plus size={18} />
-                    </button>
-                    <div className="mode-dropdown">
-                      <button
-                        type="button"
-                        className="mode-dropdown-trigger"
-                        onClick={() => setExecutionMode(executionMode === 'local' ? 'sandbox' : 'local')}
-                      >
-                        {executionMode === 'local' ? <Monitor size={14} /> : <Cloud size={14} />}
-                        <span>{executionMode === 'local' ? 'Local' : 'Sandbox'}</span>
-                        <ChevronDown size={14} />
-                      </button>
-                    </div>
+                    )}
                   </div>
-                  <button type="submit" disabled={isLoading || !input.trim()} className="send-btn-arrow">
-                    {isLoading ? <Loader2 size={18} className="spin" /> : <ArrowUp size={18} strokeWidth={2.5} />}
-                  </button>
-                </div>
-              </form>
-            </footer>
-          </>
+                )}
+
+                <div ref={messagesEndRef} />
+              </div>
+
+              {/* Scroll to bottom button - chat */}
+              {showChatScrollDown && (
+                <button className="chat-scroll-to-bottom" onClick={scrollChatToBottom} title="Scroll to bottom">
+                  <ChevronDown size={18} />
+                </button>
+              )}
+
+              {/* Floating input at bottom of chat area */}
+              <div className="floating-input-container">
+                <form onSubmit={handleSubmit} className="claude-input">
+                  <textarea
+                    ref={textareaRef}
+                    value={input}
+                    onChange={handleTextareaChange}
+                    onKeyDown={handleKeyDown}
+                    placeholder="Continue the conversation..."
+                    disabled={isLoading}
+                    rows={1}
+                  />
+                  <div className="claude-input-toolbar">
+                    <div className="toolbar-left">
+                      <button type="button" className="icon-btn" title="Attach files">
+                        <Plus size={18} />
+                      </button>
+                      <div className="mode-dropdown">
+                        <button
+                          type="button"
+                          className="mode-dropdown-trigger"
+                          onClick={() => setModeDropdownOpen(!modeDropdownOpen)}
+                        >
+                          {executionMode === 'local' ? <Monitor size={14} /> : <Cloud size={14} />}
+                          <span>{getModeConfig(executionMode)?.name || 'Local'}</span>
+                          <ChevronDown size={14} />
+                        </button>
+                        {modeDropdownOpen && (
+                          <div className="mode-dropdown-menu">
+                            {/* Local option */}
+                            <button
+                              type="button"
+                              className={`mode-option ${executionMode === 'local' ? 'active' : ''}`}
+                              onClick={() => { setExecutionMode('local'); setModeDropdownOpen(false); }}
+                            >
+                              <Monitor size={14} />
+                              <span>Local</span>
+                              {executionMode === 'local' && <Check size={14} />}
+                            </button>
+
+                            {/* Sandboxes group header */}
+                            <div className="mode-group-header">SANDBOXES</div>
+
+                            {/* E2B option */}
+                            <button
+                              type="button"
+                              className={`mode-option ${executionMode === 'e2b' ? 'active' : ''}`}
+                              onClick={() => { setExecutionMode('e2b'); setModeDropdownOpen(false); }}
+                            >
+                              <Cloud size={14} />
+                              <span>E2B</span>
+                              {executionMode === 'e2b' && <Check size={14} />}
+                            </button>
+
+                            {/* Coming soon options */}
+                            <button type="button" className="mode-option disabled" disabled>
+                              <Zap size={14} />
+                              <span>Cloudflare Workers</span>
+                              <Lock size={12} />
+                            </button>
+
+                            <button type="button" className="mode-option disabled" disabled>
+                              <Server size={14} />
+                              <span>Daytona</span>
+                              <Lock size={12} />
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    {isLoading ? (
+                      <button type="button" onClick={handleStop} className="stop-btn" title="Stop generation">
+                        <Square size={16} fill="currentColor" />
+                      </button>
+                    ) : (
+                      <button type="submit" disabled={!input.trim()} className="send-btn-arrow">
+                        <ArrowUp size={18} strokeWidth={2.5} />
+                      </button>
+                    )}
+                  </div>
+                </form>
+              </div>
+            </main>
+
+            {activeArtifact && (
+              <ArtifactPanel
+                artifact={activeArtifact}
+                onClose={() => setActiveArtifact(null)}
+                onSave={handleArtifactSave}
+                onApprove={activeArtifact.type === 'plan' && activeArtifact.editable ? handleApprove : undefined}
+              />
+            )}
+          </div>
         )}
       </div>
     </div>
@@ -1272,10 +1641,7 @@ function MainApp() {
 
 // === Root App ===
 export default function App() {
-  const { data: session, isPending, error } = useSession();
-
-  // Debug
-  console.log('Auth state:', { session, isPending, error });
+  const { data: session, isPending } = useSession();
 
   if (isPending) {
     return (

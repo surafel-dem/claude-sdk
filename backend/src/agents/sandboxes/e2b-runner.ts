@@ -1,22 +1,17 @@
 /**
- * Sandbox Runner — E2B Cloud Execution with Real-time Streaming
+ * E2B Sandbox Runner — Cloud Execution with Real-time Streaming
  *
  * Uses an async queue to bridge E2B's callback-based stdout
  * to our generator-based event streaming.
  */
 
 import type { Sandbox } from '@e2b/code-interpreter';
-import { getSandbox, setupSandbox, pause } from '../sandbox/sandbox-manager.js';
-import { RESEARCHER_PROMPT } from '../prompts/researcher.js';
+import { getSandbox, setupSandbox, pause } from '../../sandbox/sandbox-manager.js';
+import { RESEARCHER_PROMPT } from '../../prompts/researcher.js';
+import type { SandboxRunOptions, StreamEvent } from './types.js';
 
 const FILES_DIR = '/home/user/files';
 const REPORT_PATH = `${FILES_DIR}/report.md`;
-
-export type StreamEvent = {
-    type: string;
-    content: string;
-    data?: unknown;
-};
 
 // =============================================================================
 // Async Event Queue — Bridges callbacks to async iteration
@@ -63,11 +58,13 @@ class EventQueue<T> {
 }
 
 // =============================================================================
-// Sandbox Runner
+// E2B Runner
 // =============================================================================
 
-export async function* runSandbox(task: string): AsyncGenerator<StreamEvent> {
-    yield { type: 'status', content: 'Starting sandbox...' };
+export async function* runE2B(options: SandboxRunOptions): AsyncGenerator<StreamEvent> {
+    const { task } = options;
+
+    yield { type: 'status', content: 'Starting E2B sandbox...' };
 
     let sandbox: Sandbox | null = null;
     const eventQueue = new EventQueue<StreamEvent>();
@@ -96,7 +93,7 @@ export async function* runSandbox(task: string): AsyncGenerator<StreamEvent> {
                 if (event) eventQueue.push(event);
             },
             onStderr: (line) => {
-                if (line.trim()) console.error('[sandbox stderr]', line);
+                if (line.trim()) console.error('[e2b stderr]', line);
             },
         }).finally(() => eventQueue.close());
 
@@ -124,6 +121,12 @@ export async function* runSandbox(task: string): AsyncGenerator<StreamEvent> {
             yield { type: 'status', content: 'No report generated' };
         }
     } catch (error) {
+        // Check if aborted by user
+        if (options.abortController?.signal.aborted) {
+            console.log('[e2b-runner] Stopped by user');
+            yield { type: 'stopped', content: 'Stopped by user' };
+            return;
+        }
         yield { type: 'error', content: String(error) };
     } finally {
         if (sandbox) {

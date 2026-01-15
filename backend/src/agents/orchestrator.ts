@@ -10,6 +10,7 @@
 import { query, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { getSession, upsertSession, updateSessionPhase } from '../lib/convex.js';
 import { createStreamingHooks } from './hooks.js';
+import type { SandboxProvider } from './sandboxes/types.js';
 
 // =============================================================================
 // Types
@@ -26,6 +27,7 @@ export type Phase = 'planning' | 'awaiting_approval' | 'researching' | 'done';
 type RunState = {
     phase: Phase;
     mode: 'local' | 'sandbox';
+    provider?: SandboxProvider;  // Only used when mode='sandbox'
     prompt: string;
     plan?: string;
     sdkSessionId?: string;
@@ -33,6 +35,9 @@ type RunState = {
 
 // In-memory state (backed by Convex)
 const runs = new Map<string, RunState>();
+
+// AbortControllers for active runs (enables stop functionality)
+const abortControllers = new Map<string, AbortController>();
 
 // Planner prompt - concise planning
 const PLANNER_PROMPT = `You are a research planner. Create a brief plan for the research task.
@@ -56,7 +61,8 @@ Be concise. Stop after writing the plan.`;
 export async function initRun(
     runId: string,
     prompt: string,
-    mode: 'local' | 'sandbox' = 'local'
+    mode: 'local' | 'sandbox' = 'local',
+    provider?: SandboxProvider
 ): Promise<RunState> {
     // Check for existing session in Convex
     const existing = await getSession(runId);
@@ -66,6 +72,7 @@ export async function initRun(
         const state: RunState = {
             phase: existing.phase as Phase,
             mode: existing.mode as 'local' | 'sandbox',
+            provider: existing.provider as SandboxProvider | undefined,
             prompt,
             plan: existing.plan,
             sdkSessionId: existing.sdkSessionId,
@@ -75,7 +82,7 @@ export async function initRun(
     }
 
     // Create new run
-    const state: RunState = { phase: 'planning', mode, prompt };
+    const state: RunState = { phase: 'planning', mode, provider, prompt };
     runs.set(runId, state);
     return state;
 }
@@ -101,6 +108,26 @@ export async function approveRun(runId: string, plan?: string): Promise<boolean>
     return true;
 }
 
+/**
+ * Abort an active run
+ */
+export function abortRun(runId: string): boolean {
+    const controller = abortControllers.get(runId);
+    if (controller) {
+        controller.abort();
+        abortControllers.delete(runId);
+
+        // Update state
+        const state = runs.get(runId);
+        if (state) {
+            state.phase = 'done';
+            updateSessionPhase(runId, 'done').catch(() => { });
+        }
+        return true;
+    }
+    return false;
+}
+
 // =============================================================================
 // Phase 1: Planning
 // =============================================================================
@@ -120,6 +147,10 @@ export async function* runPlanning(runId: string): AsyncGenerator<StreamEvent> {
     const pendingEvents: StreamEvent[] = [];
     const hooks = createStreamingHooks((e) => pendingEvents.push(e));
 
+    // Create AbortController for this run
+    const abortController = new AbortController();
+    abortControllers.set(runId, abortController);
+
     let planContent = '';
     let capturedSessionId: string | undefined;
 
@@ -134,6 +165,7 @@ export async function* runPlanning(runId: string): AsyncGenerator<StreamEvent> {
                 cwd: './workspace',
                 includePartialMessages: true,
                 hooks,
+                abortController,
             },
         })) {
             // Capture session ID
@@ -168,8 +200,15 @@ export async function* runPlanning(runId: string): AsyncGenerator<StreamEvent> {
             }
         }
     } catch (error) {
+        // Check if aborted by user
+        if (abortController.signal.aborted) {
+            yield { type: 'stopped', content: 'Stopped by user' };
+            return;
+        }
         yield { type: 'error', content: String(error) };
         return;
+    } finally {
+        abortControllers.delete(runId);
     }
 
     // Update state and persist
@@ -219,17 +258,31 @@ export async function* runResearch(runId: string): AsyncGenerator<StreamEvent> {
     const task = `Research: ${state.prompt}\n\nPlan:\n${state.plan || 'No plan provided'}`;
 
     // Route to appropriate runner
-    if (state.mode === 'local') {
-        const { runLocal } = await import('./local-runner.js');
-        yield* runLocal({
-            threadId: runId,
-            task,
-            mode: state.mode,
-            sdkSessionId: state.sdkSessionId,
-        });
-    } else {
-        const { runSandbox } = await import('./sandbox-runner.js');
-        yield* runSandbox(task);
+    // Create AbortController for this run
+    const abortController = new AbortController();
+    abortControllers.set(runId, abortController);
+
+    try {
+        if (state.mode === 'local') {
+            const { runLocal } = await import('./local-runner.js');
+            yield* runLocal({
+                threadId: runId,
+                task,
+                mode: state.mode,
+                sdkSessionId: state.sdkSessionId,
+                abortController,
+            });
+        } else {
+            // Use sandbox registry to route to correct provider
+            const { runSandbox } = await import('./sandboxes/index.js');
+            yield* runSandbox(state.provider || 'e2b', {
+                threadId: runId,
+                task,
+                abortController,
+            });
+        }
+    } finally {
+        abortControllers.delete(runId);
     }
 
     state.phase = 'done';
