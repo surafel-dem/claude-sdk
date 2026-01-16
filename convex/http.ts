@@ -47,6 +47,63 @@ http.route({
     handler: genericMutation,
 });
 
+// Generic query endpoint for backend calls
+const genericQuery = httpAction(async (ctx, request) => {
+    const url = new URL(request.url);
+    const path = url.searchParams.get("path");
+    const argsJson = url.searchParams.get("args");
+
+    if (!path) {
+        return new Response(
+            JSON.stringify({ error: "Missing path parameter" }),
+            { status: 400, headers: { "Content-Type": "application/json" } }
+        );
+    }
+
+    try {
+        const args = argsJson ? JSON.parse(argsJson) : {};
+        const result = await ctx.runQuery(path as any, args);
+        return new Response(
+            JSON.stringify({ value: result }),
+            {
+                status: 200,
+                headers: {
+                    "Content-Type": "application/json",
+                    "Access-Control-Allow-Origin": "*"
+                }
+            }
+        );
+    } catch (error) {
+        console.error(`[HTTP] Query ${path} failed:`, error);
+        return new Response(
+            JSON.stringify({ error: String(error) }),
+            { status: 500, headers: { "Content-Type": "application/json" } }
+        );
+    }
+});
+
+http.route({
+    path: "/api/query",
+    method: "GET",
+    handler: genericQuery,
+});
+
+// CORS preflight for query
+http.route({
+    path: "/api/query",
+    method: "OPTIONS",
+    handler: httpAction(async () => {
+        return new Response(null, {
+            status: 204,
+            headers: {
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type",
+            },
+        });
+    }),
+});
+
 // CORS preflight for mutation
 http.route({
     path: "/api/mutation",

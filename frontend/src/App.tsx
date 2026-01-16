@@ -5,9 +5,10 @@ import { api } from '@convex/_generated/api';
 import type { Id } from '@convex/_generated/dataModel';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Loader2, FileText, X, Check, Edit3, Sparkles, Plus, MessageSquare, Trash2, LogOut, ArrowUp, ChevronDown, ChevronRight, Monitor, Cloud, Search, Globe, FileEdit, Square, Zap, Server, Lock, Copy, Share2, Download, Printer, PanelLeft, PanelLeftClose } from 'lucide-react';
+import { Loader2, FileText, X, Check, Edit3, Sparkles, Plus, MessageSquare, Trash2, LogOut, ArrowUp, ChevronDown, ChevronRight, Monitor, Cloud, Search, Globe, FileEdit, Square, Zap, Server, Lock, Copy, Share2, Download, Printer, PanelLeft, PanelLeftClose, FolderOpen, History, User, Upload, MoreHorizontal } from 'lucide-react';
 import { useSession, signIn, signUp, signOut } from './lib/auth-client';
 import { type ExecutionModeId, isSandbox, getModeConfig } from './providers';
+import { MODEL_PROVIDERS, type ProviderId, type ModelConfig, DEFAULT_MODEL, getModelDisplayName } from './models';
 import './App.css';
 
 // Types
@@ -200,23 +201,46 @@ function AuthScreen() {
 }
 
 // === Sidebar ===
+interface UploadFile {
+  _id: string;
+  fileName: string;
+  fileType: string;
+  fileSize: number;
+  storagePath: string;
+  createdAt: number;
+}
+
 function Sidebar({
   activeThreadId,
   onSelectThread,
   onNewThread,
   isCollapsed,
-  onToggle
+  onToggle,
+  onArtifactClick,
+  uploads,
+  onUploadClick
 }: {
   activeThreadId: Id<"threads"> | null;
   onSelectThread: (threadId: Id<"threads">) => void;
   onNewThread: () => void;
   isCollapsed: boolean;
   onToggle: () => void;
+  onArtifactClick?: (artifact: Artifact) => void;
+  uploads?: UploadFile[];
+  onUploadClick?: () => void;
 }) {
   const threads = useQuery(api.threads.list);
   const removeThread = useMutation(api.threads.remove);
   const { data: session } = useSession();
   const user = session?.user;
+  const [showHistoryModal, setShowHistoryModal] = useState(false);
+  const [showUserMenu, setShowUserMenu] = useState(false);
+
+  // Query artifacts for the active thread
+  const threadArtifacts = useQuery(
+    api.artifacts.listByThread,
+    activeThreadId ? { threadId: activeThreadId } : "skip"
+  );
 
   const handleDelete = (e: React.MouseEvent, threadId: Id<"threads">) => {
     e.stopPropagation();
@@ -239,36 +263,202 @@ function Sidebar({
     return date.toLocaleDateString();
   };
 
+  // Limit displayed threads to 4
+  const displayedThreads = threads?.slice(0, 4) || [];
+  const hasMoreThreads = (threads?.length || 0) > 4;
+
   return (
-    <aside className={`sidebar ${isCollapsed ? 'collapsed' : ''}`}>
-      {/* Toggle Button */}
-      <button className="sidebar-toggle" onClick={onToggle} title={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}>
-        {isCollapsed ? <PanelLeft size={18} /> : <PanelLeftClose size={18} />}
-      </button>
+    <>
+      <aside className={`sidebar ${isCollapsed ? 'collapsed' : ''}`}>
+        {/* Toggle Button */}
+        <button className="sidebar-toggle" onClick={onToggle} title={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}>
+          {isCollapsed ? <PanelLeft size={18} /> : <PanelLeftClose size={18} />}
+        </button>
 
-      {!isCollapsed && (
-        <>
-          <div className="sidebar-header">
-            <span className="sidebar-title">Research Sessions</span>
-            <button className="new-btn" onClick={onNewThread}>
-              <Plus size={16} />
+        {/* Collapsed Mode - Show Icon Buttons */}
+        {isCollapsed && (
+          <div className="collapsed-icons">
+            <button className="collapsed-icon-btn" onClick={onNewThread} title="New Research">
+              <Plus size={18} />
             </button>
-          </div>
-
-          <div className="thread-list">
-            {threads === undefined ? (
-              <div className="loading-threads"><Loader2 size={16} className="spin" /></div>
-            ) : threads.length === 0 ? (
-              <div className="empty-threads">
-                <MessageSquare size={20} />
-                <span>No sessions yet</span>
+            <button className="collapsed-icon-btn" onClick={onToggle} title="History">
+              <History size={18} />
+            </button>
+            <button className="collapsed-icon-btn" title="Files">
+              <FolderOpen size={18} />
+            </button>
+            <div className="collapsed-spacer" />
+            <button
+              className="collapsed-icon-btn user-icon"
+              onClick={() => setShowUserMenu(!showUserMenu)}
+              title={user?.email || 'User'}
+            >
+              <User size={18} />
+            </button>
+            {showUserMenu && (
+              <div className="collapsed-user-menu">
+                <span className="user-menu-email">{user?.email || 'User'}</span>
+                <button onClick={() => { signOut(); setShowUserMenu(false); }}>
+                  <LogOut size={14} /> Sign Out
+                </button>
               </div>
-            ) : (
-              threads.map((thread) => (
+            )}
+          </div>
+        )}
+
+        {/* Expanded Mode */}
+        {!isCollapsed && (
+          <>
+            {/* History Section */}
+            <div className="sidebar-section">
+              <div className="section-header">
+                <div className="section-title">
+                  <History size={14} />
+                  <span>History</span>
+                </div>
+                <button className="new-btn" onClick={onNewThread} title="New Research">
+                  <Plus size={16} />
+                </button>
+              </div>
+
+              <div className="thread-list">
+                {threads === undefined ? (
+                  <div className="loading-threads"><Loader2 size={16} className="spin" /></div>
+                ) : threads.length === 0 ? (
+                  <div className="empty-threads">
+                    <MessageSquare size={20} />
+                    <span>No sessions yet</span>
+                  </div>
+                ) : (
+                  <>
+                    {displayedThreads.map((thread) => (
+                      <div
+                        key={thread._id}
+                        className={`thread-item ${activeThreadId === thread._id ? "active" : ""}`}
+                        onClick={() => onSelectThread(thread._id)}
+                      >
+                        <div className="thread-info">
+                          <span className="thread-title">{thread.title}</span>
+                          <span className="thread-date">{formatDate(thread.updatedAt)}</span>
+                        </div>
+                        <button className="delete-btn" onClick={(e) => handleDelete(e, thread._id)}>
+                          <Trash2 size={12} />
+                        </button>
+                      </div>
+                    ))}
+                    {hasMoreThreads && (
+                      <button className="view-all-btn" onClick={() => setShowHistoryModal(true)}>
+                        <MoreHorizontal size={14} />
+                        <span>View all ({threads.length})</span>
+                      </button>
+                    )}
+                  </>
+                )}
+              </div>
+            </div>
+
+            {/* Workspace Section - Shows artifacts and uploads for active thread */}
+            <div className="sidebar-section files-section">
+              <div className="section-header">
+                <div className="section-title">
+                  <FolderOpen size={14} />
+                  <span>Workspace</span>
+                </div>
+                <button className="new-btn" title="Upload file" onClick={onUploadClick}>
+                  <Upload size={14} />
+                </button>
+              </div>
+              <div className="workspace-files">
+                {!activeThreadId ? (
+                  <div className="files-placeholder">
+                    <FileText size={16} />
+                    <span>Start a session to see files</span>
+                  </div>
+                ) : (threadArtifacts === undefined && uploads === undefined) ? (
+                  <div className="files-placeholder">
+                    <Loader2 size={16} className="spin" />
+                    <span>Loading...</span>
+                  </div>
+                ) : ((threadArtifacts?.length || 0) === 0 && (uploads?.length || 0) === 0) ? (
+                  <div className="files-placeholder">
+                    <FileText size={16} />
+                    <span>No files yet</span>
+                  </div>
+                ) : (
+                  <>
+                    {/* Uploaded files */}
+                    {uploads?.map((file) => (
+                      <div key={file._id} className="workspace-file-item upload">
+                        <Upload size={14} />
+                        <div className="file-item-info">
+                          <span className="file-item-name">{file.fileName}</span>
+                          <span className="file-item-type">
+                            {(file.fileSize / 1024).toFixed(1)}KB
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                    {/* Artifacts */}
+                    {threadArtifacts?.map((artifact) => (
+                      <button
+                        key={artifact._id}
+                        className="workspace-file-item"
+                        onClick={() => onArtifactClick?.({
+                          id: artifact._id,
+                          type: artifact.type as 'plan' | 'report',
+                          title: artifact.title,
+                          content: artifact.content,
+                          editable: false
+                        })}
+                      >
+                        <FileText size={14} />
+                        <div className="file-item-info">
+                          <span className="file-item-name">{artifact.title}</span>
+                          <span className="file-item-type">
+                            {artifact.type === 'plan'
+                              ? (artifact.status === 'approved' ? 'Approved' : 'Plan')
+                              : 'Report'}
+                          </span>
+                        </div>
+                      </button>
+                    ))}
+                  </>
+                )}
+              </div>
+            </div>
+
+            {/* User Footer */}
+            <div className="sidebar-footer">
+              {user && (
+                <div className="user-info">
+                  <User size={14} />
+                  <span className="user-email">{user.email || 'User'}</span>
+                  <button className="signout-btn" onClick={() => signOut()} title="Sign out">
+                    <LogOut size={14} />
+                  </button>
+                </div>
+              )}
+            </div>
+          </>
+        )}
+      </aside>
+
+      {/* History Modal */}
+      {showHistoryModal && threads && (
+        <div className="modal-overlay" onClick={() => setShowHistoryModal(false)}>
+          <div className="history-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>All Research Sessions</h3>
+              <button className="modal-close" onClick={() => setShowHistoryModal(false)}>
+                <X size={18} />
+              </button>
+            </div>
+            <div className="modal-content">
+              {threads.map((thread) => (
                 <div
                   key={thread._id}
-                  className={`thread-item ${activeThreadId === thread._id ? "active" : ""}`}
-                  onClick={() => onSelectThread(thread._id)}
+                  className={`modal-thread-item ${activeThreadId === thread._id ? "active" : ""}`}
+                  onClick={() => { onSelectThread(thread._id); setShowHistoryModal(false); }}
                 >
                   <div className="thread-info">
                     <span className="thread-title">{thread.title}</span>
@@ -278,23 +468,234 @@ function Sidebar({
                     <Trash2 size={12} />
                   </button>
                 </div>
-              ))
-            )}
+              ))}
+            </div>
           </div>
+        </div>
+      )}
+    </>
+  );
+}
 
-          <div className="sidebar-footer">
-            {user && (
-              <div className="user-info">
-                <span className="user-email">{user.email || 'User'}</span>
-                <button className="signout-btn" onClick={() => signOut()}>
-                  <LogOut size={14} />
+// === Model Selector Popover ===
+function ModelSelectorPopover({
+  isOpen,
+  onClose,
+  selectedModel,
+  onSelectModel
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  selectedModel: ModelConfig;
+  onSelectModel: (config: ModelConfig) => void;
+}) {
+  const [activeProvider, setActiveProvider] = useState<ProviderId>(selectedModel.providerId);
+  const popoverRef = useRef<HTMLDivElement>(null);
+
+  // Click outside to close
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const handleClickOutside = (e: MouseEvent) => {
+      if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
+        onClose();
+      }
+    };
+
+    // Delay to prevent immediate close on open click
+    const timeout = setTimeout(() => {
+      document.addEventListener('mousedown', handleClickOutside);
+    }, 0);
+
+    return () => {
+      clearTimeout(timeout);
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [isOpen, onClose]);
+
+  if (!isOpen) return null;
+
+  const providers = Object.values(MODEL_PROVIDERS);
+  const currentProvider = MODEL_PROVIDERS[activeProvider];
+
+  return (
+    <div ref={popoverRef} className="model-selector-popover">
+      {/* Left: Provider Icons */}
+      <div className="provider-icons">
+        {providers.map((provider) => (
+          <button
+            key={provider.id}
+            className={`provider-icon-btn ${activeProvider === provider.id ? 'active' : ''}`}
+            onClick={() => setActiveProvider(provider.id as ProviderId)}
+            title={provider.name}
+          >
+            <img src={provider.icon} alt={provider.name} className="provider-icon-img" />
+          </button>
+        ))}
+      </div>
+
+      {/* Right: Model List */}
+      <div className="model-list">
+        <div className="model-list-header">
+          <span>{currentProvider.name}</span>
+        </div>
+        <div className="model-list-items">
+          {currentProvider.models.map((model) => {
+            const isSelected = selectedModel.providerId === activeProvider && selectedModel.modelId === model.id;
+            return (
+              <button
+                key={model.id}
+                className={`model-item ${isSelected ? 'active' : ''}`}
+                onClick={() => {
+                  onSelectModel({ providerId: activeProvider, modelId: model.id });
+                  onClose();
+                }}
+              >
+                <div className="model-item-info">
+                  <span className="model-name">{model.name}</span>
+                  {model.tag && <span className="model-tag">{model.tag}</span>}
+                </div>
+                {isSelected && <Check size={16} />}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// === Reusable Chat Input ===
+function ChatInput({
+  input,
+  onInputChange,
+  onSubmit,
+  onKeyDown,
+  onStop,
+  onUpload,
+  textareaRef,
+  placeholder = "Ask anything...",
+  isLoading,
+  isUploading,
+  executionMode,
+  setExecutionMode,
+  modeDropdownOpen,
+  setModeDropdownOpen,
+  modelSelectorOpen,
+  setModelSelectorOpen,
+  selectedModel,
+  setSelectedModel,
+}: {
+  input: string;
+  onInputChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => void;
+  onSubmit: (e: FormEvent) => void;
+  onKeyDown: (e: React.KeyboardEvent<HTMLTextAreaElement>) => void;
+  onStop?: () => void;
+  onUpload?: () => void;
+  textareaRef: React.RefObject<HTMLTextAreaElement | null>;
+  placeholder?: string;
+  isLoading: boolean;
+  isUploading?: boolean;
+  executionMode: ExecutionModeId;
+  setExecutionMode: (mode: ExecutionModeId) => void;
+  modeDropdownOpen: boolean;
+  setModeDropdownOpen: (open: boolean) => void;
+  modelSelectorOpen: boolean;
+  setModelSelectorOpen: (open: boolean) => void;
+  selectedModel: ModelConfig;
+  setSelectedModel: (config: ModelConfig) => void;
+}) {
+  return (
+    <form onSubmit={onSubmit} className="claude-input">
+      <textarea
+        ref={textareaRef}
+        value={input}
+        onChange={onInputChange}
+        onKeyDown={onKeyDown}
+        placeholder={placeholder}
+        disabled={isLoading}
+        rows={1}
+      />
+      <div className="claude-input-toolbar">
+        <div className="toolbar-left">
+          <button type="button" className="icon-btn" title="Upload file" onClick={onUpload} disabled={isUploading}>
+            {isUploading ? <Loader2 size={18} className="spin" /> : <Plus size={18} />}
+          </button>
+          <div className="mode-dropdown">
+            <button
+              type="button"
+              className="mode-dropdown-trigger"
+              onClick={() => setModeDropdownOpen(!modeDropdownOpen)}
+            >
+              {executionMode === 'local' ? <Monitor size={14} /> : <Cloud size={14} />}
+              <span>{getModeConfig(executionMode)?.name || 'Local'}</span>
+              <ChevronDown size={14} />
+            </button>
+            {modeDropdownOpen && (
+              <div className="mode-dropdown-menu">
+                <button
+                  type="button"
+                  className={`mode-option ${executionMode === 'local' ? 'active' : ''}`}
+                  onClick={() => { setExecutionMode('local'); setModeDropdownOpen(false); }}
+                >
+                  <Monitor size={14} />
+                  <span>Local</span>
+                  {executionMode === 'local' && <Check size={14} />}
+                </button>
+                <div className="mode-group-header">SANDBOXES</div>
+                <button
+                  type="button"
+                  className={`mode-option ${executionMode === 'e2b' ? 'active' : ''}`}
+                  onClick={() => { setExecutionMode('e2b'); setModeDropdownOpen(false); }}
+                >
+                  <Cloud size={14} />
+                  <span>E2B</span>
+                  {executionMode === 'e2b' && <Check size={14} />}
+                </button>
+                <button type="button" className="mode-option disabled" disabled>
+                  <Zap size={14} />
+                  <span>Cloudflare Workers</span>
+                  <Lock size={12} />
+                </button>
+                <button type="button" className="mode-option disabled" disabled>
+                  <Server size={14} />
+                  <span>Daytona</span>
+                  <Lock size={12} />
                 </button>
               </div>
             )}
           </div>
-        </>
-      )}
-    </aside>
+
+          {/* Model Selector Button + Popover */}
+          <div className="model-selector-container">
+            <button
+              type="button"
+              className="model-selector-trigger"
+              onClick={() => setModelSelectorOpen(!modelSelectorOpen)}
+              title="Select model"
+            >
+              <span>{getModelDisplayName(selectedModel)}</span>
+              <ChevronDown size={14} />
+            </button>
+            <ModelSelectorPopover
+              isOpen={modelSelectorOpen}
+              onClose={() => setModelSelectorOpen(false)}
+              selectedModel={selectedModel}
+              onSelectModel={setSelectedModel}
+            />
+          </div>
+        </div>
+        {isLoading && onStop ? (
+          <button type="button" onClick={onStop} className="stop-btn" title="Stop generation">
+            <Square size={16} fill="currentColor" />
+          </button>
+        ) : (
+          <button type="submit" disabled={isLoading || !input.trim()} className="send-btn-arrow">
+            <ArrowUp size={18} strokeWidth={2.5} />
+          </button>
+        )}
+      </div>
+    </form>
   );
 }
 
@@ -682,11 +1083,17 @@ function ArtifactPanel({ artifact, onClose, onSave, onApprove }: {
         )}
 
         {/* Approval Footer (for plans) */}
-        {artifact.type === 'plan' && artifact.editable && onApprove && (
+        {artifact.type === 'plan' && (
           <div className="artifact-approval">
-            <button className="approve-btn" onClick={onApprove}>
-              <Sparkles size={14} /> Approve & Start Research
-            </button>
+            {artifact.editable && onApprove ? (
+              <button className="approve-btn" onClick={onApprove}>
+                <Sparkles size={14} /> Approve & Start Research
+              </button>
+            ) : (
+              <div className="approved-indicator">
+                <Check size={14} /> Plan Approved
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -797,14 +1204,19 @@ function MainApp() {
   const [modeDropdownOpen, setModeDropdownOpen] = useState(false);
   const [showChatScrollDown, setShowChatScrollDown] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [selectedModel, setSelectedModel] = useState<ModelConfig>(DEFAULT_MODEL);
+  const [modelSelectorOpen, setModelSelectorOpen] = useState(false);
+  const [uploadingFile, setUploadingFile] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const currentRunIdRef = useRef<string | null>(null);  // Track current run for continuation
   const eventSourceRef = useRef<EventSource | null>(null);  // Track EventSource for stop functionality
 
   // Convex mutations for persistence (fire-and-forget, don't affect UI)
   const createThread = useMutation(api.threads.create);
+  const updateThread = useMutation(api.threads.update);
   const sendMessage = useMutation(api.messages.send);
   const updateArtifact = useMutation(api.artifacts.update);
 
@@ -815,6 +1227,14 @@ function MainApp() {
   );
   const threadArtifacts = useQuery(
     api.artifacts.listByThread,
+    activeThreadId ? { threadId: activeThreadId } : "skip"
+  );
+  const threadUploads = useQuery(
+    api.uploads.list,
+    activeThreadId ? { threadId: activeThreadId } : "skip"
+  );
+  const currentThread = useQuery(
+    api.threads.get,
     activeThreadId ? { threadId: activeThreadId } : "skip"
   );
 
@@ -917,12 +1337,16 @@ function MainApp() {
     if (urlThreadId && urlThreadId !== activeThreadId) {
       const threadId = urlThreadId as Id<"threads">;
       setActiveThreadId(threadId);
-      setCurrentParts([]);
+      // Only clear currentParts if we're NOT actively streaming
+      // (prevents reset when navigate() is called during handleSubmit)
+      if (!isLoading) {
+        setCurrentParts([]);
+      }
       setActiveArtifact(null);
       // Reset loaded flag so useEffect will load this thread's data
       loadedThreadRef.current = null;
     }
-  }, [urlThreadId]);
+  }, [urlThreadId, isLoading]);
 
   const handleNewThread = async () => {
     setActiveThreadId(null);
@@ -959,11 +1383,15 @@ function MainApp() {
 
     // Create thread if needed
     let threadId = activeThreadId;
+    const newTitle = userMessage.slice(0, 50) + (userMessage.length > 50 ? '...' : '');
+
     if (!threadId) {
-      const title = userMessage.slice(0, 50) + (userMessage.length > 50 ? '...' : '');
-      threadId = await createThread({ title });
+      threadId = await createThread({ title: newTitle });
       setActiveThreadId(threadId);
       navigate(`/chat/${threadId}`);
+    } else if (currentThread?.title === 'New Chat') {
+      // Update thread title if it was created from file upload
+      updateThread({ threadId, title: newTitle }).catch(console.error);
     }
 
     // Show user message IMMEDIATELY
@@ -982,7 +1410,14 @@ function MainApp() {
       const chatResponse = await fetch('http://localhost:3001/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: userMessage, threadId, mode, provider }),
+        body: JSON.stringify({
+          message: userMessage,
+          threadId,
+          mode,
+          provider,
+          providerId: selectedModel.providerId,
+          modelId: selectedModel.modelId,
+        }),
         credentials: 'include',
       });
 
@@ -1132,6 +1567,10 @@ function MainApp() {
           sendMessage({ threadId, role: 'assistant', content: streamState.textContent });
         }
 
+        // Mark thread as loaded BEFORE setIsLoading(false) to prevent
+        // the thread loading useEffect from overwriting our messages
+        loadedThreadRef.current = threadId;
+
         setMessages(prev => [...prev, { role: 'assistant', parts: finalParts }]);
         setCurrentParts([]);
         setIsLoading(false);
@@ -1201,12 +1640,62 @@ function MainApp() {
     }
   };
 
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // Create thread if needed
+    let threadId = activeThreadId;
+    if (!threadId) {
+      // Use generic title - will be updated when user sends first message
+      threadId = await createThread({ title: 'New Chat' });
+      setActiveThreadId(threadId);
+      navigate(`/chat/${threadId}`);
+    }
+
+    setUploadingFile(true);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const res = await fetch(`http://localhost:3001/api/upload/${threadId}`, {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!res.ok) {
+        throw new Error('Upload failed');
+      }
+
+      const data = await res.json();
+      console.log('[Upload] Success:', data);
+    } catch (err) {
+      console.error('[Upload] Error:', err);
+    } finally {
+      setUploadingFile(false);
+      // Reset file input
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
+  };
+
+  const triggerFileUpload = () => {
+    fileInputRef.current?.click();
+  };
+
   const handleApprove = async () => {
     if (!activeArtifact || !currentRunIdRef.current) return;
 
     const planContent = activeArtifact.content;
+    const artifactId = activeArtifact.id;
     setActiveArtifact(null);
     setIsLoading(true);
+
+    // Update artifact status in Convex to "approved" (fire-and-forget)
+    if (artifactId) {
+      updateArtifact({ id: artifactId, status: 'approved' }).catch(console.error);
+    }
 
     // Update the artifact in messages to show as approved
     setMessages(prev => prev.map(msg => ({
@@ -1382,6 +1871,12 @@ function MainApp() {
         sendMessage({ threadId: activeThreadId, role: 'assistant', content: streamState.textContent });
       }
 
+      // Mark thread as loaded BEFORE setIsLoading(false) to prevent
+      // the thread loading useEffect from overwriting our messages
+      if (activeThreadId) {
+        loadedThreadRef.current = activeThreadId;
+      }
+
       setMessages(prev => [...prev, { role: 'assistant', parts: finalParts }]);
       setCurrentParts([]);
       setIsLoading(false);
@@ -1394,12 +1889,24 @@ function MainApp() {
 
   return (
     <div className={`app ${activeArtifact ? 'panel-open' : ''}`}>
+      {/* Hidden file input for uploads */}
+      <input
+        type="file"
+        ref={fileInputRef}
+        onChange={handleFileUpload}
+        style={{ display: 'none' }}
+        accept=".txt,.md,.pdf,.json,.csv,.xml,.html"
+      />
+
       <Sidebar
         activeThreadId={activeThreadId}
         onSelectThread={handleSelectThread}
         onNewThread={handleNewThread}
         isCollapsed={sidebarCollapsed}
         onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
+        onArtifactClick={setActiveArtifact}
+        uploads={threadUploads}
+        onUploadClick={triggerFileUpload}
       />
 
       <div className="main-content">
@@ -1410,79 +1917,25 @@ function MainApp() {
               <h1 className="landing-title">What would you like to research?</h1>
               <p className="landing-subtitle">I'll create a plan, gather information, and write a comprehensive report.</p>
 
-              <form onSubmit={handleSubmit} className="claude-input">
-                <textarea
-                  ref={textareaRef}
-                  value={input}
-                  onChange={handleTextareaChange}
-                  onKeyDown={handleKeyDown}
-                  placeholder="Ask anything..."
-                  disabled={isLoading}
-                  rows={1}
-                />
-                <div className="claude-input-toolbar">
-                  <div className="toolbar-left">
-                    <button type="button" className="icon-btn" title="Attach files">
-                      <Plus size={18} />
-                    </button>
-                    <div className="mode-dropdown">
-                      <button
-                        type="button"
-                        className="mode-dropdown-trigger"
-                        onClick={() => setModeDropdownOpen(!modeDropdownOpen)}
-                      >
-                        {executionMode === 'local' ? <Monitor size={14} /> : <Cloud size={14} />}
-                        <span>{getModeConfig(executionMode)?.name || 'Local'}</span>
-                        <ChevronDown size={14} />
-                      </button>
-                      {modeDropdownOpen && (
-                        <div className="mode-dropdown-menu">
-                          {/* Local option */}
-                          <button
-                            type="button"
-                            className={`mode-option ${executionMode === 'local' ? 'active' : ''}`}
-                            onClick={() => { setExecutionMode('local'); setModeDropdownOpen(false); }}
-                          >
-                            <Monitor size={14} />
-                            <span>Local</span>
-                            {executionMode === 'local' && <Check size={14} />}
-                          </button>
-
-                          {/* Sandboxes group header */}
-                          <div className="mode-group-header">SANDBOXES</div>
-
-                          {/* E2B option */}
-                          <button
-                            type="button"
-                            className={`mode-option ${executionMode === 'e2b' ? 'active' : ''}`}
-                            onClick={() => { setExecutionMode('e2b'); setModeDropdownOpen(false); }}
-                          >
-                            <Cloud size={14} />
-                            <span>E2B</span>
-                            {executionMode === 'e2b' && <Check size={14} />}
-                          </button>
-
-                          {/* Coming soon options */}
-                          <button type="button" className="mode-option disabled" disabled>
-                            <Zap size={14} />
-                            <span>Cloudflare Workers</span>
-                            <Lock size={12} />
-                          </button>
-
-                          <button type="button" className="mode-option disabled" disabled>
-                            <Server size={14} />
-                            <span>Daytona</span>
-                            <Lock size={12} />
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                  <button type="submit" disabled={isLoading || !input.trim()} className="send-btn-arrow">
-                    <ArrowUp size={18} strokeWidth={2.5} />
-                  </button>
-                </div>
-              </form>
+              <ChatInput
+                input={input}
+                onInputChange={handleTextareaChange}
+                onSubmit={handleSubmit}
+                onKeyDown={handleKeyDown}
+                onUpload={triggerFileUpload}
+                textareaRef={textareaRef}
+                placeholder="Ask anything..."
+                isLoading={isLoading}
+                isUploading={uploadingFile}
+                executionMode={executionMode}
+                setExecutionMode={setExecutionMode}
+                modeDropdownOpen={modeDropdownOpen}
+                setModeDropdownOpen={setModeDropdownOpen}
+                modelSelectorOpen={modelSelectorOpen}
+                setModelSelectorOpen={setModelSelectorOpen}
+                selectedModel={selectedModel}
+                setSelectedModel={setSelectedModel}
+              />
 
               <div className="suggestion-chips">
                 <button onClick={() => setInput("Research the latest trends in AI agents")} className="chip">
@@ -1542,85 +1995,26 @@ function MainApp() {
 
               {/* Floating input at bottom of chat area */}
               <div className="floating-input-container">
-                <form onSubmit={handleSubmit} className="claude-input">
-                  <textarea
-                    ref={textareaRef}
-                    value={input}
-                    onChange={handleTextareaChange}
-                    onKeyDown={handleKeyDown}
-                    placeholder="Continue the conversation..."
-                    disabled={isLoading}
-                    rows={1}
-                  />
-                  <div className="claude-input-toolbar">
-                    <div className="toolbar-left">
-                      <button type="button" className="icon-btn" title="Attach files">
-                        <Plus size={18} />
-                      </button>
-                      <div className="mode-dropdown">
-                        <button
-                          type="button"
-                          className="mode-dropdown-trigger"
-                          onClick={() => setModeDropdownOpen(!modeDropdownOpen)}
-                        >
-                          {executionMode === 'local' ? <Monitor size={14} /> : <Cloud size={14} />}
-                          <span>{getModeConfig(executionMode)?.name || 'Local'}</span>
-                          <ChevronDown size={14} />
-                        </button>
-                        {modeDropdownOpen && (
-                          <div className="mode-dropdown-menu">
-                            {/* Local option */}
-                            <button
-                              type="button"
-                              className={`mode-option ${executionMode === 'local' ? 'active' : ''}`}
-                              onClick={() => { setExecutionMode('local'); setModeDropdownOpen(false); }}
-                            >
-                              <Monitor size={14} />
-                              <span>Local</span>
-                              {executionMode === 'local' && <Check size={14} />}
-                            </button>
-
-                            {/* Sandboxes group header */}
-                            <div className="mode-group-header">SANDBOXES</div>
-
-                            {/* E2B option */}
-                            <button
-                              type="button"
-                              className={`mode-option ${executionMode === 'e2b' ? 'active' : ''}`}
-                              onClick={() => { setExecutionMode('e2b'); setModeDropdownOpen(false); }}
-                            >
-                              <Cloud size={14} />
-                              <span>E2B</span>
-                              {executionMode === 'e2b' && <Check size={14} />}
-                            </button>
-
-                            {/* Coming soon options */}
-                            <button type="button" className="mode-option disabled" disabled>
-                              <Zap size={14} />
-                              <span>Cloudflare Workers</span>
-                              <Lock size={12} />
-                            </button>
-
-                            <button type="button" className="mode-option disabled" disabled>
-                              <Server size={14} />
-                              <span>Daytona</span>
-                              <Lock size={12} />
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                    {isLoading ? (
-                      <button type="button" onClick={handleStop} className="stop-btn" title="Stop generation">
-                        <Square size={16} fill="currentColor" />
-                      </button>
-                    ) : (
-                      <button type="submit" disabled={!input.trim()} className="send-btn-arrow">
-                        <ArrowUp size={18} strokeWidth={2.5} />
-                      </button>
-                    )}
-                  </div>
-                </form>
+                <ChatInput
+                  input={input}
+                  onInputChange={handleTextareaChange}
+                  onSubmit={handleSubmit}
+                  onKeyDown={handleKeyDown}
+                  onStop={handleStop}
+                  onUpload={triggerFileUpload}
+                  textareaRef={textareaRef}
+                  placeholder="Continue the conversation..."
+                  isLoading={isLoading}
+                  isUploading={uploadingFile}
+                  executionMode={executionMode}
+                  setExecutionMode={setExecutionMode}
+                  modeDropdownOpen={modeDropdownOpen}
+                  setModeDropdownOpen={setModeDropdownOpen}
+                  modelSelectorOpen={modelSelectorOpen}
+                  setModelSelectorOpen={setModelSelectorOpen}
+                  selectedModel={selectedModel}
+                  setSelectedModel={setSelectedModel}
+                />
               </div>
             </main>
 

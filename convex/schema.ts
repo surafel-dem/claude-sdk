@@ -62,4 +62,14 @@ export default defineSchema({
         createdAt: v.number(),
         updatedAt: v.number(),
     }).index("by_thread", ["threadId"]),
+
+    // User uploaded files
+    uploads: defineTable({
+        threadId: v.id("threads"),
+        fileName: v.string(),
+        fileType: v.string(),
+        fileSize: v.number(),
+        storagePath: v.string(),
+        createdAt: v.number(),
+    }).index("by_thread", ["threadId"]),
 });

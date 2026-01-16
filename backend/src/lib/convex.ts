@@ -97,11 +97,19 @@ export async function getSession(threadId: string): Promise<Session | null> {
         params.set('args', JSON.stringify({ threadId }));
 
         const response = await fetch(`${BASE_URL}/api/query?${params}`);
-        if (!response.ok) return null;
+        if (!response.ok) {
+            console.log(`[Convex] sessions:getByThread failed for ${threadId}: ${response.status}`);
+            return null;
+        }
 
         const result = await response.json();
-        return result.value ?? result;
-    } catch {
+        const session = result.value ?? result;
+        if (session) {
+            console.log(`[Convex] Found session for ${threadId}: phase=${session.phase}`);
+        }
+        return session;
+    } catch (e) {
+        console.error(`[Convex] sessions:getByThread error:`, e);
         return null;
     }
 }
@@ -158,5 +166,62 @@ export async function getThreadHistory(threadId: string): Promise<ThreadHistory 
         return await response.json();
     } catch {
         return null;
+    }
+}
+
+// =============================================================================
+// Uploads
+// =============================================================================
+
+export async function createUpload(
+    threadId: string,
+    fileName: string,
+    fileType: string,
+    fileSize: number,
+    storagePath: string
+): Promise<{ id: string } | null> {
+    const result = await mutation<string>('uploads:create', {
+        threadId,
+        fileName,
+        fileType,
+        fileSize,
+        storagePath,
+    });
+    return result ? { id: result } : null;
+}
+
+export interface UploadFile {
+    _id: string;
+    fileName: string;
+    fileType: string;
+    fileSize: number;
+    storagePath: string;
+}
+
+export async function getUploads(threadId: string): Promise<UploadFile[]> {
+    if (!BASE_URL) return [];
+
+    // Skip query for non-Convex IDs (UUIDs, etc.) - they won't have uploads
+    // Convex IDs are typically 25-32 alphanumeric characters without hyphens
+    if (threadId.includes('-') || threadId.length < 20) {
+        return [];
+    }
+
+    try {
+        const params = new URLSearchParams();
+        params.set('path', 'uploads:list');
+        params.set('args', JSON.stringify({ threadId }));
+
+        const response = await fetch(`${BASE_URL}/api/query?${params}`);
+        if (!response.ok) {
+            console.log(`[Convex] uploads:list failed for ${threadId}: ${response.status}`);
+            return [];
+        }
+
+        const result = await response.json();
+        return result.value ?? result ?? [];
+    } catch (e) {
+        console.error(`[Convex] uploads:list error for ${threadId}:`, e);
+        return [];
     }
 }

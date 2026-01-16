@@ -71,24 +71,33 @@ export async function* runLocal(options: RunOptions): AsyncGenerator<StreamEvent
         console.log(`[local-runner] Mode: ${mode}, SessionDir: ${sessionDir}`);
         console.log(`[local-runner] Task length: ${task.length} chars`);
 
+        // Build query options with session resume if available
+        const queryOptions: any = {
+            systemPrompt: sessionPrompt,
+            mcpServers: { 'exa-search': exaSearchTools },
+            allowedTools: [
+                'mcp__exa-search__search',
+                'mcp__exa-search__get_contents',
+                'Write',
+                'Read',
+            ],
+            maxTurns: 15,
+            cwd: sessionDir,
+            permissionMode: 'acceptEdits',
+            includePartialMessages: true,
+            hooks,
+            abortController: options.abortController,
+        };
+
+        // Resume session if we have a session ID (for conversation continuity)
+        if (options.sdkSessionId) {
+            queryOptions.resume = options.sdkSessionId;
+            console.log(`[local-runner] Resuming session: ${options.sdkSessionId}`);
+        }
+
         for await (const msg of query({
             prompt: generatePrompt() as AsyncIterable<any>,
-            options: {
-                systemPrompt: sessionPrompt,
-                mcpServers: { 'exa-search': exaSearchTools },
-                allowedTools: [
-                    'mcp__exa-search__search',
-                    'mcp__exa-search__get_contents',
-                    'Write',
-                    'Read',
-                ],
-                maxTurns: 15,
-                cwd: sessionDir,
-                permissionMode: 'acceptEdits',
-                includePartialMessages: true,
-                hooks,
-                abortController: options.abortController,
-            },
+            options: queryOptions,
         })) {
             // Capture SDK session ID on init
             if (msg.type === 'system' && (msg as any).subtype === 'init') {

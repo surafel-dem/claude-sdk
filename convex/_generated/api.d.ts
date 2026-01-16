@@ -15,6 +15,7 @@ import type * as internal_ from "../internal.js";
 import type * as messages from "../messages.js";
 import type * as sessions from "../sessions.js";
 import type * as threads from "../threads.js";
+import type * as uploads from "../uploads.js";
 import type * as users from "../users.js";
 
 import type {
@@ -31,6 +32,7 @@ declare const fullApi: ApiFromModules<{
   messages: typeof messages;
   sessions: typeof sessions;
   threads: typeof threads;
+  uploads: typeof uploads;
   users: typeof users;
 }>;
 

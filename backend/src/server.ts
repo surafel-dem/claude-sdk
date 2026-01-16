@@ -15,6 +15,9 @@ import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
 import { zValidator } from '@hono/zod-validator';
 import { z } from 'zod';
+import { mkdir, writeFile } from 'fs/promises';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import {
     initRun,
     getRunState,
@@ -23,7 +26,10 @@ import {
     runPlanning,
     runResearch,
 } from './agents/index.js';
-import { createArtifact, getSession } from './lib/convex.js';
+import { createArtifact, getSession, createUpload } from './lib/convex.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const WORKSPACES_DIR = join(__dirname, '..', 'workspaces');
 
 // =============================================================================
 // Validation Schemas
@@ -34,6 +40,9 @@ const chatSchema = z.object({
     threadId: z.string().optional(),
     mode: z.enum(['local', 'sandbox']).default('local'),
     provider: z.enum(['e2b', 'cloudflare', 'daytona']).optional(),
+    // LLM provider/model selection
+    providerId: z.enum(['claude', 'minimax', 'glm', 'kimi']).optional(),
+    modelId: z.string().optional(),
 });
 
 const continueSchema = z.object({
@@ -65,11 +74,11 @@ const routes = app
 
     // Initialize run (checks for existing session)
     .post('/api/chat', zValidator('json', chatSchema), async (c) => {
-        const { message, threadId, mode, provider } = c.req.valid('json');
+        const { message, threadId, mode, provider, providerId, modelId } = c.req.valid('json');
         const runId = threadId || crypto.randomUUID();
 
-        const state = await initRun(runId, message, mode, provider);
-        console.log(`[server] Run ${runId}: phase=${state.phase}, mode=${mode}, provider=${provider || 'n/a'}`);
+        const state = await initRun(runId, message, mode, provider, providerId, modelId);
+        console.log(`[server] Run ${runId}: phase=${state.phase}, mode=${mode}, provider=${provider || 'n/a'}, llm=${providerId || 'default'}/${modelId || 'default'}`);
 
         return c.json({ runId, threadId: runId, phase: state.phase }, 200);
     })
@@ -87,9 +96,9 @@ const routes = app
             return streamSSE(c, async (stream) => {
                 await stream.writeSSE({
                     event: 'info',
-                    data: JSON.stringify({ phase: state.phase, plan: state.plan }),
+                    data: JSON.stringify({ phase: state.phase || 'unknown', plan: state.plan }),
                 });
-                await stream.writeSSE({ event: 'done', data: state.phase });
+                await stream.writeSSE({ event: 'done', data: state.phase || 'done' });
             });
         }
 
@@ -107,10 +116,11 @@ const routes = app
                             await stream.writeSSE({ event: event.type, data: JSON.stringify(eventData) });
                         } catch (e) {
                             console.error('[artifact error]', e);
-                            await stream.writeSSE({ event: event.type, data: event.content });
+                            await stream.writeSSE({ event: event.type, data: event.content || '' });
                         }
                     } else {
-                        await stream.writeSSE({ event: event.type, data: event.content });
+                        // Guard against undefined content
+                        await stream.writeSSE({ event: event.type, data: event.content || '' });
                     }
                 }
             },
@@ -212,6 +222,49 @@ const routes = app
         }
 
         return c.json({ exists: false }, 200);
+    })
+
+    // Upload file to workspace
+    .post('/api/upload/:threadId', async (c) => {
+        const threadId = c.req.param('threadId');
+
+        try {
+            const body = await c.req.parseBody();
+            const file = body['file'];
+
+            if (!file || !(file instanceof File)) {
+                return c.json({ error: 'No file provided' }, 400);
+            }
+
+            // Create workspace directory for this thread
+            const uploadDir = join(WORKSPACES_DIR, threadId, 'uploads');
+            await mkdir(uploadDir, { recursive: true });
+
+            // Save file to disk
+            const filePath = join(uploadDir, file.name);
+            const buffer = Buffer.from(await file.arrayBuffer());
+            await writeFile(filePath, buffer);
+
+            // Store relative path for agent access
+            const storagePath = `workspaces/${threadId}/uploads/${file.name}`;
+
+            // Persist to Convex
+            const result = await createUpload(threadId, file.name, file.type, file.size, storagePath);
+
+            console.log(`[upload] File saved: ${file.name} (${file.size} bytes) for thread ${threadId}`);
+
+            return c.json({
+                ok: true,
+                id: result?.id,
+                fileName: file.name,
+                fileType: file.type,
+                fileSize: file.size,
+                storagePath,
+            }, 200);
+        } catch (err) {
+            console.error('[upload error]', err);
+            return c.json({ error: String(err) }, 500);
+        }
     });
 
 // =============================================================================

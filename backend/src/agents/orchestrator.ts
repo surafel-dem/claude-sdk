@@ -8,8 +8,9 @@
  */
 
 import { query, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
-import { getSession, upsertSession, updateSessionPhase } from '../lib/convex.js';
+import { getSession, upsertSession, updateSessionPhase, getUploads, type UploadFile } from '../lib/convex.js';
 import { createStreamingHooks } from './hooks.js';
+import { applyProviderConfig, type ProviderId } from '../lib/providers.js';
 import type { SandboxProvider } from './sandboxes/types.js';
 
 // =============================================================================
@@ -31,6 +32,11 @@ type RunState = {
     prompt: string;
     plan?: string;
     sdkSessionId?: string;
+    // LLM provider/model selection
+    providerId?: ProviderId;
+    modelId?: string;
+    // Uploaded files for context
+    uploads?: UploadFile[];
 };
 
 // In-memory state (backed by Convex)
@@ -51,6 +57,21 @@ const PLANNER_PROMPT = `You are a research planner. Create a brief plan for the 
 
 Be concise. Stop after writing the plan.`;
 
+/**
+ * Format uploaded files as context for the agent
+ */
+function formatFileContext(uploads: UploadFile[]): string {
+    if (!uploads || uploads.length === 0) return '';
+
+    const fileList = uploads.map(f => `- ${f.fileName} (${f.fileType}, ${(f.fileSize / 1024).toFixed(1)}KB) at ${f.storagePath}`).join('\n');
+
+    return `\n\n## Uploaded Files
+The user has uploaded the following files that you can reference:
+${fileList}
+
+You can read these files using the Read tool if they are relevant to the task.`;
+}
+
 // =============================================================================
 // Run Management
 // =============================================================================
@@ -62,28 +83,65 @@ export async function initRun(
     runId: string,
     prompt: string,
     mode: 'local' | 'sandbox' = 'local',
-    provider?: SandboxProvider
+    provider?: SandboxProvider,
+    providerId?: ProviderId,
+    modelId?: string
 ): Promise<RunState> {
+    // Apply LLM provider config if specified
+    if (providerId) {
+        applyProviderConfig(providerId);
+        console.log(`[orchestrator] Using LLM provider: ${providerId}, model: ${modelId || 'default'}`);
+    }
+
+    // Fetch uploaded files for this thread
+    const uploads = await getUploads(runId);
+    if (uploads.length > 0) {
+        console.log(`[orchestrator] Found ${uploads.length} uploaded files for thread ${runId}`);
+    }
+
     // Check for existing session in Convex
     const existing = await getSession(runId);
 
-    if (existing && existing.phase !== 'done') {
-        // Resume existing session
-        const state: RunState = {
-            phase: existing.phase as Phase,
-            mode: existing.mode as 'local' | 'sandbox',
-            provider: existing.provider as SandboxProvider | undefined,
-            prompt,
-            plan: existing.plan,
-            sdkSessionId: existing.sdkSessionId,
-        };
-        runs.set(runId, state);
-        return state;
+    if (existing && existing.phase) {
+        if (existing.phase !== 'done') {
+            // Resume in-progress session
+            const state: RunState = {
+                phase: existing.phase as Phase,
+                mode: (existing.mode as 'local' | 'sandbox') || mode,
+                provider: existing.provider as SandboxProvider | undefined,
+                prompt,
+                plan: existing.plan,
+                sdkSessionId: existing.sdkSessionId,
+                providerId,
+                modelId,
+                uploads,
+            };
+            runs.set(runId, state);
+            console.log(`[orchestrator] Resuming in-progress session: phase=${state.phase}, plan=${!!state.plan}`);
+            return state;
+        } else {
+            // Session is done - start new planning phase but KEEP the session ID for context continuity
+            const state: RunState = {
+                phase: 'planning',
+                mode: (existing.mode as 'local' | 'sandbox') || mode,
+                provider: existing.provider as SandboxProvider | undefined,
+                prompt,
+                plan: undefined, // Clear plan for new research
+                sdkSessionId: existing.sdkSessionId, // KEEP session ID for conversation context!
+                providerId,
+                modelId,
+                uploads,
+            };
+            runs.set(runId, state);
+            console.log(`[orchestrator] Continuing after done - resuming session: ${existing.sdkSessionId}`);
+            return state;
+        }
     }
 
-    // Create new run
-    const state: RunState = { phase: 'planning', mode, provider, prompt };
+    // Create new run (fresh start - no existing session)
+    const state: RunState = { phase: 'planning', mode, provider, prompt, providerId, modelId, uploads };
     runs.set(runId, state);
+    console.log(`[orchestrator] New run: phase=${state.phase}`);
     return state;
 }
 
@@ -155,18 +213,34 @@ export async function* runPlanning(runId: string): AsyncGenerator<StreamEvent> {
     let capturedSessionId: string | undefined;
 
     try {
+        // Use selected model or default to sonnet
+        const model = state.modelId || 'sonnet';
+
+        // Build system prompt with file context if uploads exist
+        const fileContext = formatFileContext(state.uploads || []);
+        const systemPrompt = PLANNER_PROMPT + fileContext;
+
+        // Build query options
+        const queryOptions: any = {
+            systemPrompt,
+            allowedTools: ['Write', 'Read'],
+            maxTurns: 5,
+            model,
+            cwd: './workspace',
+            includePartialMessages: true,
+            hooks,
+            abortController,
+        };
+
+        // Resume session if we have a session ID (for conversation continuity)
+        if (state.sdkSessionId) {
+            queryOptions.resume = state.sdkSessionId;
+            console.log(`[orchestrator] Resuming planning session: ${state.sdkSessionId}`);
+        }
+
         for await (const msg of query({
             prompt: state.prompt,
-            options: {
-                systemPrompt: PLANNER_PROMPT,
-                allowedTools: ['Write'],
-                maxTurns: 5,
-                model: 'sonnet',
-                cwd: './workspace',
-                includePartialMessages: true,
-                hooks,
-                abortController,
-            },
+            options: queryOptions,
         })) {
             // Capture session ID
             if (msg.type === 'system' && (msg as any).subtype === 'init') {
@@ -255,7 +329,9 @@ export async function* runResearch(runId: string): AsyncGenerator<StreamEvent> {
         return;
     }
 
-    const task = `Research: ${state.prompt}\n\nPlan:\n${state.plan || 'No plan provided'}`;
+    // Build task with file context if uploads exist
+    const fileContext = formatFileContext(state.uploads || []);
+    const task = `Research: ${state.prompt}\n\nPlan:\n${state.plan || 'No plan provided'}${fileContext}`;
 
     // Route to appropriate runner
     // Create AbortController for this run
